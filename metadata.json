@@ -1,0 +1,6 @@
+{
+  "name": "EnemFlix",
+  "description": "Uma plataforma de estudos para o ENEM inspirada na Netflix, com simulados integrados e por bloco de matérias, treino de redação especializado, gamificação e Inteligência Artificial para cronogramas e recomendações.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
