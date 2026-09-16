@@ -22,8 +22,20 @@ import {
   EyeOff,
   Users,
   Compass,
-  UserPlus
+  UserPlus,
+  Globe2,
+  Database
 } from "lucide-react";
+import { 
+  db, 
+  collection, 
+  getDocs, 
+  onSnapshot, 
+  doc, 
+  updateDoc, 
+  deleteDoc, 
+  setDoc 
+} from "../lib/firebase";
 
 interface AdminUser {
   uid: string;
@@ -67,6 +79,75 @@ function isDemoAdminUser(u: Partial<AdminUser>): boolean {
     email === "mariana.direito@outlook.com" ||
     email === "rodrigo.expirado@gmail.com"
   );
+}
+
+function calculateUserUsage(createdAtStr?: string) {
+  const limitDays = 365;
+  const created = createdAtStr ? new Date(createdAtStr) : new Date();
+  const now = new Date();
+  const diffMs = Math.max(0, now.getTime() - created.getTime());
+  const daysUsing = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+  const daysRemaining = Math.max(0, limitDays - daysUsing);
+  const isExpired = daysUsing >= limitDays;
+  const progressPercentage = Math.min(100, Math.round((daysUsing / limitDays) * 100));
+
+  let timeUsingFormatted = "";
+  if (daysUsing === 0) {
+    const minutes = Math.floor(diffMs / (1000 * 60));
+    if (minutes < 60) {
+      timeUsingFormatted = minutes <= 1 ? "Agora mesmo" : `${minutes} min`;
+    } else {
+      const hours = Math.floor(minutes / 60);
+      timeUsingFormatted = `${hours}h`;
+    }
+  } else if (daysUsing === 1) {
+    timeUsingFormatted = "1 dia";
+  } else {
+    timeUsingFormatted = `${daysUsing} dias`;
+  }
+
+  return {
+    daysUsing,
+    daysRemaining,
+    isExpired,
+    progressPercentage,
+    timeUsingFormatted
+  };
+}
+
+function docToAdminUser(data: any, docId: string): AdminUser {
+  const createdAt = data.createdAt || new Date().toISOString();
+  const usage = calculateUserUsage(createdAt);
+  const isBanned = !!data.isBanned;
+  const isDisconnected = !!data.isDisconnected;
+  const isExpired = usage.isExpired;
+
+  let status: "active" | "disconnected" | "banned" | "expired" = "active";
+  if (isBanned) status = "banned";
+  else if (isExpired) status = "expired";
+  else if (isDisconnected) status = "disconnected";
+
+  return {
+    uid: docId || data.uid,
+    email: data.email || "",
+    name: data.name || (data.email ? data.email.split("@")[0] : "Aluno"),
+    phone: data.phone || "",
+    targetCourse: data.targetCourse || "Medicina",
+    targetScore: Number(data.targetScore) || 750,
+    type: data.type || (data.isGuest ? "guest" : "auth"),
+    createdAt,
+    lastLoginAt: data.lastLoginAt || createdAt,
+    lastActiveAt: data.lastActiveAt || data.lastLoginAt || createdAt,
+    loginCount: Number(data.loginCount) || 1,
+    isBanned,
+    isDisconnected,
+    daysUsing: usage.daysUsing,
+    daysRemaining: usage.daysRemaining,
+    isExpired,
+    progressPercentage: usage.progressPercentage,
+    timeUsingFormatted: usage.timeUsingFormatted,
+    status
+  };
 }
 
 export default function AdminModal({ isOpen, onClose }: AdminModalProps) {
@@ -122,86 +203,140 @@ export default function AdminModal({ isOpen, onClose }: AdminModalProps) {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [isOpen, onClose, showAddModal]);
 
-  // Fallback users helper (strictly real accounts, never fake examples)
-  const getFallbackUsers = (): AdminUser[] => {
+  // Real accounts cache helper (strictly real accounts, never fake examples)
+  const getCachedAdminUsers = (): AdminUser[] => {
     try {
       const cached = localStorage.getItem("enemflix_admin_users_cache");
       if (cached) {
         const parsed = JSON.parse(cached);
         if (Array.isArray(parsed)) {
-          const clean = parsed.filter(u => !isDemoAdminUser(u));
-          return clean;
+          return parsed.filter(u => !isDemoAdminUser(u));
         }
       }
     } catch (e) {}
-
-    const fallbackList: AdminUser[] = [];
-    const localUserRaw = localStorage.getItem("enemflix_user_profile");
-    if (localUserRaw) {
-      try {
-        const p = JSON.parse(localUserRaw);
-        if (p && p.uid && !isDemoAdminUser(p)) {
-          fallbackList.push({
-            uid: p.uid,
-            email: p.email || "aluno@enemflix.com",
-            name: p.name || "Estudante Atual",
-            phone: p.phone || "",
-            targetCourse: p.targetCourse || "Medicina",
-            targetScore: p.targetScore || 750,
-            type: p.isGuest ? "guest" : "auth",
-            createdAt: p.createdAt || new Date().toISOString(),
-            lastLoginAt: new Date().toISOString(),
-            lastActiveAt: new Date().toISOString(),
-            loginCount: 1,
-            isBanned: false,
-            isDisconnected: false,
-            daysUsing: 0,
-            daysRemaining: 365,
-            isExpired: false,
-            progressPercentage: 0,
-            timeUsingFormatted: "Hoje",
-            status: "active"
-          });
-        }
-      } catch (e) {}
-    }
-
-    return fallbackList;
+    return [];
   };
 
-  // Load users when authenticated
+  // Load users from Firestore Cloud Database and Server API
   const fetchUsers = async () => {
     setIsLoading(true);
     try {
-      const res = await fetch("/api/admin/users", {
-        headers: {
-          "x-admin-password": "pirulitobaby"
+      // 1. Fetch directly from Firestore Cloud Database
+      const firestoreList: AdminUser[] = [];
+      try {
+        const snap = await getDocs(collection(db, "users"));
+        snap.forEach(d => {
+          const u = d.data();
+          if (!isDemoAdminUser(u)) {
+            firestoreList.push(docToAdminUser(u, d.id));
+          }
+        });
+      } catch (fsErr) {
+        console.warn("Firestore direct query notice:", fsErr);
+      }
+
+      // 2. Fetch from Server Database API
+      let serverList: AdminUser[] = [];
+      try {
+        const res = await fetch("/api/admin/users", {
+          headers: {
+            "x-admin-password": "pirulitobaby"
+          }
+        });
+        const data = await res.json();
+        if (data.success && Array.isArray(data.users)) {
+          serverList = data.users.filter((u: AdminUser) => !isDemoAdminUser(u));
+        }
+      } catch (srvErr) {
+        console.warn("Server API fetch notice:", srvErr);
+      }
+
+      // 3. Merge both sources by UID and Email without duplicates
+      const userMap = new Map<string, AdminUser>();
+      [...serverList, ...firestoreList].forEach(u => {
+        const key = (u.uid || u.email || "").toLowerCase();
+        if (!key) return;
+        if (!userMap.has(key)) {
+          userMap.set(key, u);
+        } else {
+          const existing = userMap.get(key)!;
+          userMap.set(key, {
+            ...existing,
+            ...u,
+            isBanned: existing.isBanned || u.isBanned,
+            isDisconnected: existing.isDisconnected || u.isDisconnected
+          });
         }
       });
-      const data = await res.json();
-      if (data.success && Array.isArray(data.users)) {
-        // Leave strictly real accounts created in database
-        const cleanUsers = data.users.filter((u: AdminUser) => !isDemoAdminUser(u));
-        setUsers(cleanUsers);
-        try {
-          localStorage.setItem("enemflix_admin_users_cache", JSON.stringify(cleanUsers));
-        } catch (e) {}
-      } else {
-        const fallback = getFallbackUsers();
-        setUsers(fallback);
-      }
+
+      const merged = Array.from(userMap.values()).sort((a, b) => 
+        new Date(b.lastLoginAt || b.createdAt).getTime() - new Date(a.lastLoginAt || a.createdAt).getTime()
+      );
+
+      setUsers(merged);
+      try {
+        localStorage.setItem("enemflix_admin_users_cache", JSON.stringify(merged));
+      } catch (e) {}
     } catch (err) {
-      const fallback = getFallbackUsers();
-      setUsers(fallback);
+      console.error("Erro geral ao carregar usuários:", err);
+      const cached = getCachedAdminUsers();
+      if (cached.length > 0) setUsers(cached);
     } finally {
       setIsLoading(false);
     }
   };
 
+  // Real-time Firestore live listener when modal is open and authenticated
   useEffect(() => {
-    if (isOpen && isAuthenticated) {
-      fetchUsers();
+    if (!isOpen || !isAuthenticated) return;
+
+    // Initial fetch
+    fetchUsers();
+
+    // Subscribe to real-time updates from Firestore cloud collection
+    let unsubscribe = () => {};
+    try {
+      const usersCol = collection(db, "users");
+      unsubscribe = onSnapshot(usersCol, (snapshot) => {
+        const liveFirestoreUsers: AdminUser[] = [];
+        snapshot.forEach((docSnap) => {
+          const data = docSnap.data();
+          if (!isDemoAdminUser(data)) {
+            liveFirestoreUsers.push(docToAdminUser(data, docSnap.id));
+          }
+        });
+
+        if (liveFirestoreUsers.length > 0) {
+          setUsers(prev => {
+            const userMap = new Map<string, AdminUser>();
+            // Keep existing server-only users, update with live Firestore
+            prev.forEach(u => {
+              const k = (u.uid || u.email || "").toLowerCase();
+              if (k) userMap.set(k, u);
+            });
+            liveFirestoreUsers.forEach(u => {
+              const k = (u.uid || u.email || "").toLowerCase();
+              if (k) userMap.set(k, u);
+            });
+            const merged = Array.from(userMap.values()).sort((a, b) => 
+              new Date(b.lastLoginAt || b.createdAt).getTime() - new Date(a.lastLoginAt || a.createdAt).getTime()
+            );
+            try {
+              localStorage.setItem("enemflix_admin_users_cache", JSON.stringify(merged));
+            } catch (e) {}
+            return merged;
+          });
+        }
+      }, (error) => {
+        console.warn("Real-time listener warning:", error);
+      });
+    } catch (e) {
+      console.warn("Could not attach real-time listener:", e);
     }
+
+    return () => {
+      unsubscribe();
+    };
   }, [isOpen, isAuthenticated]);
 
   const handlePasswordSubmit = async (e: React.FormEvent) => {
@@ -262,7 +397,7 @@ export default function AdminModal({ isOpen, onClose }: AdminModalProps) {
     }, 4000);
   };
 
-  // User Actions with optimistic update + server synchronization
+  // User Actions with optimistic update + Firestore + Server synchronization
   const handleToggleDisconnect = async (user: AdminUser) => {
     const nextDisconnectedState = !user.isDisconnected;
     
@@ -281,6 +416,17 @@ export default function AdminModal({ isOpen, onClose }: AdminModalProps) {
       nextDisconnectedState ? `Usuário ${user.name} desconectado!` : `Sessão de ${user.name} restabelecida.`
     );
 
+    // 1. Sync directly to Firestore
+    try {
+      await updateDoc(doc(db, "users", user.uid), {
+        isDisconnected: nextDisconnectedState,
+        disconnectedAt: nextDisconnectedState ? new Date().toISOString() : null
+      });
+    } catch (fsErr) {
+      console.warn("Firestore disconnect sync:", fsErr);
+    }
+
+    // 2. Sync to Server
     const endpoint = nextDisconnectedState ? "/api/admin/disconnect" : "/api/admin/reconnect";
     try {
       await fetch(endpoint, {
@@ -292,7 +438,7 @@ export default function AdminModal({ isOpen, onClose }: AdminModalProps) {
         body: JSON.stringify({ uid: user.uid })
       });
     } catch (e: any) {
-      // Background sync, state is already preserved locally
+      // Background sync
     }
   };
 
@@ -315,6 +461,18 @@ export default function AdminModal({ isOpen, onClose }: AdminModalProps) {
       newBannedState ? `Usuário ${user.name} foi BANIDO.` : `Banimento de ${user.name} foi revogado.`
     );
 
+    // 1. Sync directly to Firestore
+    try {
+      await updateDoc(doc(db, "users", user.uid), {
+        isBanned: newBannedState,
+        isDisconnected: newBannedState ? true : user.isDisconnected,
+        bannedAt: newBannedState ? new Date().toISOString() : null
+      });
+    } catch (fsErr) {
+      console.warn("Firestore ban sync:", fsErr);
+    }
+
+    // 2. Sync to Server
     try {
       await fetch("/api/admin/ban", {
         method: "POST",
@@ -325,16 +483,17 @@ export default function AdminModal({ isOpen, onClose }: AdminModalProps) {
         body: JSON.stringify({ uid: user.uid, banned: newBannedState })
       });
     } catch (e: any) {
-      // Background sync, state is already preserved locally
+      // Background sync
     }
   };
 
   const handleResetTime = async (user: AdminUser) => {
+    const nowIso = new Date().toISOString();
     // Optimistic update
     setUsers(prev => {
       const updated = prev.map(u => u.uid === user.uid ? { 
         ...u, 
-        createdAt: new Date().toISOString(),
+        createdAt: nowIso,
         daysUsing: 0,
         daysRemaining: 365,
         isExpired: false,
@@ -348,6 +507,16 @@ export default function AdminModal({ isOpen, onClose }: AdminModalProps) {
 
     showNotification(`Limite de 365 dias renovado para ${user.name}!`);
 
+    // 1. Sync to Firestore
+    try {
+      await updateDoc(doc(db, "users", user.uid), {
+        createdAt: nowIso
+      });
+    } catch (fsErr) {
+      console.warn("Firestore reset-time sync:", fsErr);
+    }
+
+    // 2. Sync to Server
     try {
       await fetch("/api/admin/reset-time", {
         method: "POST",
@@ -372,8 +541,16 @@ export default function AdminModal({ isOpen, onClose }: AdminModalProps) {
       return updated;
     });
 
-    showNotification(`Registro de ${user.name} removido.`);
+    showNotification(`Registro de ${user.name} removido do banco.`);
 
+    // 1. Delete from Firestore
+    try {
+      await deleteDoc(doc(db, "users", user.uid));
+    } catch (fsErr) {
+      console.warn("Firestore delete sync:", fsErr);
+    }
+
+    // 2. Delete from Server
     try {
       await fetch("/api/admin/delete-user", {
         method: "POST",
@@ -491,6 +668,28 @@ export default function AdminModal({ isOpen, onClose }: AdminModalProps) {
       if (!res.ok || !data.success) {
         setCreateError(data.error || "Não foi possível cadastrar o usuário.");
         return;
+      }
+
+      const nowIso = new Date().toISOString();
+      const generatedUid = (data.user && data.user.uid) || "usr_" + Date.now() + "_" + Math.random().toString(36).substring(2, 6);
+      try {
+        await setDoc(doc(db, "users", generatedUid), {
+          uid: generatedUid,
+          name: newName.trim(),
+          email: newEmail.trim().toLowerCase(),
+          phone: newPhone.trim(),
+          targetCourse: newCourse,
+          targetScore: Number(newScore) || 750,
+          type: "auth",
+          createdAt: nowIso,
+          lastLoginAt: nowIso,
+          lastActiveAt: nowIso,
+          loginCount: 0,
+          isBanned: false,
+          isDisconnected: false
+        }, { merge: true });
+      } catch (fsErr) {
+        console.warn("Firestore user creation sync:", fsErr);
       }
 
       setActionMessage({

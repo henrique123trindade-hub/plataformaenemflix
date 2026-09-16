@@ -1,0 +1,34 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "Registered user account profile across the entire platform",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "name": { "type": "string" },
+        "email": { "type": "string", "format": "email" },
+        "phone": { "type": "string" },
+        "targetCourse": { "type": "string" },
+        "targetScore": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "lastLoginAt": { "type": "string", "format": "date-time" },
+        "lastActiveAt": { "type": "string", "format": "date-time" },
+        "loginCount": { "type": "number" },
+        "isBanned": { "type": "boolean" },
+        "isDisconnected": { "type": "boolean" },
+        "type": { "type": "string" },
+        "role": { "type": "string" },
+        "streak": { "type": "number" },
+        "lastStudyDate": { "type": "string" }
+      },
+      "required": ["uid", "email", "name"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User account documents stored in centralized cloud database"
+    }
+  }
+}

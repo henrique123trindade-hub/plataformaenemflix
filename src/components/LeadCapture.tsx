@@ -163,16 +163,23 @@ export default function LeadCapture({ onCapture, alertMessage }: LeadCaptureProp
       try {
         await Promise.race([
           setDoc(doc(db, "users", finalUid), {
+            uid: finalUid,
             name: profile.name,
-            email: profile.email,
+            email: profile.email.toLowerCase(),
             phone: profile.phone,
             targetCourse: profile.targetCourse,
             targetScore: profile.targetScore,
             createdAt: profile.createdAt,
+            lastLoginAt: new Date().toISOString(),
+            lastActiveAt: new Date().toISOString(),
+            loginCount: 1,
+            isBanned: false,
+            isDisconnected: false,
+            type: "auth",
             streak: 1,
             lastStudyDate: new Date().toISOString()
-          }),
-          new Promise((resolve) => setTimeout(resolve, 2000))
+          }, { merge: true }),
+          new Promise((resolve) => setTimeout(resolve, 2500))
         ]);
       } catch (fsErr) {
         console.warn("[Firestore sync warning]", fsErr);
@@ -267,9 +274,20 @@ export default function LeadCapture({ onCapture, alertMessage }: LeadCaptureProp
 
         localStorage.setItem("enemflix_user_profile", JSON.stringify(profile));
 
-        // Atualizar preferências do Firestore em segundo plano se existirem
+        // Atualizar preferências e carimbo de acesso no Firestore
         try {
           const userDocRef = doc(db, "users", profile.uid);
+          setDoc(userDocRef, {
+            uid: profile.uid,
+            name: profile.name,
+            email: profile.email.toLowerCase(),
+            phone: profile.phone || "",
+            targetCourse: profile.targetCourse || "Medicina",
+            targetScore: profile.targetScore || 750,
+            lastLoginAt: new Date().toISOString(),
+            lastActiveAt: new Date().toISOString()
+          }, { merge: true }).catch(() => {});
+
           getDoc(userDocRef).then((snap) => {
             if (snap.exists()) {
               const data = snap.data();
