@@ -1,6 +1,6 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { LeadProfile } from "../types";
-import { Sparkles, Mail, Lock, User as UserIcon, Phone as PhoneIcon, Award, Compass, ArrowLeft, Eye, EyeOff } from "lucide-react";
+import { Sparkles, Mail, Lock, User as UserIcon, Phone as PhoneIcon, ArrowLeft, Eye, EyeOff } from "lucide-react";
 import { 
   auth, 
   db, 
@@ -14,9 +14,10 @@ import {
 
 interface LeadCaptureProps {
   onCapture: (profile: LeadProfile) => void;
+  alertMessage?: string;
 }
 
-export default function LeadCapture({ onCapture }: LeadCaptureProps) {
+export default function LeadCapture({ onCapture, alertMessage }: LeadCaptureProps) {
   const [mode, setMode] = useState<"signin" | "signup" | "forgot">("signin");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -24,10 +25,39 @@ export default function LeadCapture({ onCapture }: LeadCaptureProps) {
   const [phone, setPhone] = useState("");
   const [targetCourse, setTargetCourse] = useState("Medicina");
   const [targetScore, setTargetScore] = useState(750);
-  const [error, setError] = useState("");
+  const [error, setError] = useState(alertMessage || "");
   const [success, setSuccess] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
+
+  useEffect(() => {
+    if (alertMessage) {
+      setError(alertMessage);
+    }
+  }, [alertMessage]);
+
+  const syncLoginWithServer = async (p: LeadProfile, type: "auth" | "guest" | "google") => {
+    try {
+      const res = await fetch("/api/auth/record-login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          uid: p.uid,
+          email: p.email,
+          name: p.name,
+          phone: p.phone,
+          targetCourse: p.targetCourse,
+          targetScore: p.targetScore,
+          type
+        })
+      });
+      const data = await res.json();
+      return data;
+    } catch (e) {
+      console.warn("Aviso ao registrar login no servidor:", e);
+      return { success: true };
+    }
+  };
 
   const formatPhoneNumber = (value: string) => {
     const cleaned = value.replace(/\D/g, "");
@@ -114,6 +144,17 @@ export default function LeadCapture({ onCapture }: LeadCaptureProps) {
         ]);
       } catch (fsErr) {
         console.warn("[Firestore sync warning during register]", fsErr);
+      }
+
+      // Sync with Admin Logins system
+      const syncResult = await syncLoginWithServer(profile, "auth");
+      if (syncResult && syncResult.isBanned) {
+        setError("Esta conta está banida pelo administrador. Acesso negado.");
+        return;
+      }
+      if (syncResult && syncResult.isExpired) {
+        setError("O período limite de uso de 365 dias (1 ano) expirou para esta conta.");
+        return;
       }
 
       onCapture(profile);
@@ -245,6 +286,18 @@ export default function LeadCapture({ onCapture }: LeadCaptureProps) {
       }
 
       localStorage.setItem("enemflix_user_profile", JSON.stringify(profile));
+
+      // Sync with Admin Logins system
+      const syncResult = await syncLoginWithServer(profile, "auth");
+      if (syncResult && syncResult.isBanned) {
+        setError("Esta conta foi banida pelo administrador do sistema.");
+        return;
+      }
+      if (syncResult && syncResult.isExpired) {
+        setError("O período limite de uso de 365 dias (1 ano) expirou para esta conta.");
+        return;
+      }
+
       onCapture(profile);
     } catch (err: any) {
       console.error("[Login Error]", err);
@@ -276,23 +329,39 @@ export default function LeadCapture({ onCapture }: LeadCaptureProps) {
     }
   };
 
-  // Continue as Guest (local-only storage, no sync required unless they log in)
-  const handleContinueAsGuest = () => {
-    setIsLoading(true);
-    setTimeout(() => {
-      setIsLoading(false);
-      onCapture({
-        name: "Estudante Convidado",
-        email: "convidado@enemflix.com",
-        phone: "",
-        targetCourse: "Medicina",
-        targetScore: 700,
-        isLeadCaptured: true,
-        isGuest: true,
-        createdAt: new Date().toISOString()
-      });
-    }, 600);
-  };
+  // Hidden Guest Access via F2
+  useEffect(() => {
+    const handleKeyDown = async (e: KeyboardEvent) => {
+      if (e.key === "F2" || e.code === "F2") {
+        e.preventDefault();
+        const guestUid = "guest_" + Date.now();
+        const guestProfile: LeadProfile = {
+          name: "Estudante Convidado",
+          email: "convidado@enemflix.com",
+          phone: "",
+          targetCourse: "Medicina",
+          targetScore: 700,
+          isLeadCaptured: true,
+          isGuest: true,
+          uid: guestUid,
+          createdAt: new Date().toISOString()
+        };
+
+        const syncResult = await syncLoginWithServer(guestProfile, "guest");
+        if (syncResult && syncResult.isBanned) {
+          setError("O acesso como convidado está desativado pelo administrador.");
+          return;
+        }
+
+        onCapture(guestProfile);
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [onCapture]);
 
   return (
     <div 
@@ -637,23 +706,7 @@ export default function LeadCapture({ onCapture }: LeadCaptureProps) {
           </div>
         )}
 
-        <div className="relative flex py-4 items-center">
-          <div className="flex-grow border-t border-white/10"></div>
-          <span className="flex-shrink mx-4 text-zinc-500 text-[10px] uppercase tracking-widest font-black">ou</span>
-          <div className="flex-grow border-t border-white/10"></div>
-        </div>
-
-        {/* Guest Access Option */}
-        <div className="space-y-2.5">
-          <button
-            onClick={handleContinueAsGuest}
-            disabled={isLoading}
-            className="w-full bg-[#1a1a1a] hover:bg-[#252525] border border-white/5 text-zinc-300 font-semibold py-2.5 px-4 rounded text-xs transition flex items-center justify-center gap-2 shadow cursor-pointer"
-          >
-            <Compass className="w-4 h-4 text-zinc-400" />
-            <span>Entrar como Convidado (Sem login)</span>
-          </button>
-        </div>
+        {/* Confidential footer */}
 
         <p className="text-center text-[9px] text-zinc-500 mt-5 leading-relaxed">
           Sua privacidade é nossa prioridade. Ao continuar, você aceita o armazenamento seguro dos seus dados de estudo.

@@ -23,6 +23,7 @@ import Simulator from "./components/Simulator";
 import AIPanel from "./components/AIPanel";
 import EssayTraining from "./components/EssayTraining";
 import UserProfileTab from "./components/UserProfileTab";
+import AdminModal from "./components/AdminModal";
 
 import { Award, Compass, Search, Sparkles, Home, BookOpen, ClipboardList, Brain, PenTool, User } from "lucide-react";
 import { 
@@ -71,6 +72,67 @@ export default function App() {
   const [searchQuery, setSearchQuery] = useState<string>("");
   const [selectedVideo, setSelectedVideo] = useState<Video | null>(null);
   const [isSyncing, setIsSyncing] = useState<boolean>(false);
+
+  // 5. Admin & Session Restriction States (F3 shortcut & 365d limit)
+  const [isAdminOpen, setIsAdminOpen] = useState<boolean>(false);
+  const [sessionAlertMessage, setSessionAlertMessage] = useState<string>("");
+
+  // Global F3 shortcut listener
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "F3" || e.code === "F3") {
+        e.preventDefault();
+        setIsAdminOpen(prev => !prev);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, []);
+
+  // Monitor live session status (enforces disconnect, ban and 365-day limit)
+  useEffect(() => {
+    if (!userProfile?.uid) return;
+
+    const checkStatus = async () => {
+      try {
+        const res = await fetch("/api/auth/check-status", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            uid: userProfile.uid,
+            email: userProfile.email
+          })
+        });
+        const data = await res.json();
+        
+        if (data.isBanned || data.isDisconnected || data.isExpired) {
+          try {
+            await signOut(auth);
+          } catch (e) {}
+          localStorage.removeItem("enemflix_user_profile");
+          setUserProfile(null);
+          
+          if (data.isBanned) {
+            setSessionAlertMessage("Esta conta foi suspensa/banida pelo administrador.");
+          } else if (data.isExpired) {
+            setSessionAlertMessage("Seu limite de 1 ano (365 dias) de uso na plataforma EnemFlix expirou.");
+          } else {
+            setSessionAlertMessage("Sua sessão foi encerrada pelo administrador.");
+          }
+        }
+      } catch (e) {
+        // Ignored on network hiccups
+      }
+    };
+
+    checkStatus();
+    const interval = setInterval(checkStatus, 7000);
+    window.addEventListener("focus", checkStatus);
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener("focus", checkStatus);
+    };
+  }, [userProfile?.uid, userProfile?.email]);
 
   // Initialize app state
   useEffect(() => {
@@ -559,7 +621,12 @@ export default function App() {
 
   // Render Gate: Capture Leads first
   if (!userProfile || !userProfile.isLeadCaptured) {
-    return <LeadCapture onCapture={handleCaptureLead} />;
+    return (
+      <>
+        <LeadCapture onCapture={handleCaptureLead} alertMessage={sessionAlertMessage} />
+        <AdminModal isOpen={isAdminOpen} onClose={() => setIsAdminOpen(false)} />
+      </>
+    );
   }
 
   return (
@@ -928,6 +995,9 @@ export default function App() {
           </div>
         </div>
       </footer>
+
+      {/* 6. Admin Panel Modal (Triggered by F3) */}
+      <AdminModal isOpen={isAdminOpen} onClose={() => setIsAdminOpen(false)} />
 
     </div>
   );

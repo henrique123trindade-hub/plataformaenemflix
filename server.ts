@@ -1,5 +1,6 @@
 import express from "express";
 import path from "path";
+import fs from "fs";
 import dotenv from "dotenv";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, Type } from "@google/genai";
@@ -326,6 +327,421 @@ async function startServer() {
         success: false, 
         error: error.message || "Erro interno ao processar requisição de Inteligência Artificial." 
       });
+    }
+  });
+
+  // ==========================================
+  // SISTEMA DE ADMINISTRAÇÃO & CONTROLE DE LOGINS
+  // Senha de Acesso: "pirulitobaby"
+  // Limite de Uso: 1 ano / 365 dias
+  // ==========================================
+  const ADMIN_PASSWORD = "pirulitobaby";
+  const LIMIT_DAYS = 365;
+  const DATA_DIR = path.join(process.cwd(), "data");
+  const LOGINS_FILE = path.join(DATA_DIR, "admin_logins.json");
+
+  interface UserLoginRecord {
+    uid: string;
+    email: string;
+    name: string;
+    phone?: string;
+    targetCourse?: string;
+    targetScore?: number;
+    type: "auth" | "guest" | "google";
+    createdAt: string; // Data do primeiro login / cadastro
+    lastLoginAt: string; // Data do último login efetuado
+    lastActiveAt: string; // Última atividade
+    loginCount: number;
+    isBanned: boolean;
+    bannedAt?: string;
+    banReason?: string;
+    isDisconnected: boolean;
+    disconnectedAt?: string;
+    userAgent?: string;
+  }
+
+  function ensureDataDir(): void {
+    try {
+      if (!fs.existsSync(DATA_DIR)) {
+        fs.mkdirSync(DATA_DIR, { recursive: true });
+      }
+      if (!fs.existsSync(LOGINS_FILE)) {
+        fs.writeFileSync(LOGINS_FILE, JSON.stringify([], null, 2), "utf-8");
+      }
+    } catch (e) {
+      console.warn("Aviso ao criar diretório de dados:", e);
+    }
+  }
+
+  function getStoredLogins(): UserLoginRecord[] {
+    ensureDataDir();
+    try {
+      if (!fs.existsSync(LOGINS_FILE)) return [];
+      const content = fs.readFileSync(LOGINS_FILE, "utf-8");
+      return JSON.parse(content || "[]");
+    } catch (e) {
+      console.error("Erro ao ler admin_logins.json:", e);
+      return [];
+    }
+  }
+
+  function saveStoredLogins(records: UserLoginRecord[]): boolean {
+    ensureDataDir();
+    try {
+      fs.writeFileSync(LOGINS_FILE, JSON.stringify(records, null, 2), "utf-8");
+      return true;
+    } catch (e) {
+      console.error("Erro ao salvar admin_logins.json:", e);
+      return false;
+    }
+  }
+
+  function calculateUsage(createdAtIso: string) {
+    const start = new Date(createdAtIso).getTime();
+    const now = Date.now();
+    const diffMs = Math.max(0, now - start);
+    
+    const diffSeconds = Math.floor(diffMs / 1000);
+    const diffMinutes = Math.floor(diffSeconds / 60);
+    const diffHours = Math.floor(diffMinutes / 60);
+    const diffDays = Math.floor(diffHours / 24);
+
+    let timeUsingFormatted = "";
+    if (diffDays >= 365) {
+      const years = Math.floor(diffDays / 365);
+      const remDays = diffDays % 365;
+      timeUsingFormatted = `${diffDays} dias (${years} ano${years > 1 ? "s" : ""}${remDays > 0 ? ` e ${remDays}d` : ""})`;
+    } else if (diffDays > 0) {
+      const remHours = diffHours % 24;
+      timeUsingFormatted = `${diffDays} dia${diffDays > 1 ? "s" : ""}${remHours > 0 ? ` e ${remHours}h` : ""}`;
+    } else if (diffHours > 0) {
+      const remMins = diffMinutes % 60;
+      timeUsingFormatted = `${diffHours} hora${diffHours > 1 ? "s" : ""}${remMins > 0 ? ` e ${remMins}m` : ""}`;
+    } else if (diffMinutes > 0) {
+      timeUsingFormatted = `${diffMinutes} minuto${diffMinutes > 1 ? "s" : ""}`;
+    } else {
+      timeUsingFormatted = "Menos de 1 minuto";
+    }
+
+    const daysUsing = diffDays;
+    const daysRemaining = Math.max(0, LIMIT_DAYS - daysUsing);
+    const isExpired = daysUsing >= LIMIT_DAYS;
+    const progressPercentage = Math.min(100, Math.round((daysUsing / LIMIT_DAYS) * 100));
+
+    return {
+      daysUsing,
+      daysRemaining,
+      isExpired,
+      progressPercentage,
+      timeUsingFormatted,
+      limitDays: LIMIT_DAYS
+    };
+  }
+
+  // 1. Gravar ou atualizar login de usuário
+  app.post("/api/auth/record-login", (req, res) => {
+    try {
+      const { uid, email, name, phone, targetCourse, targetScore, type } = req.body;
+      if (!uid || !email) {
+        return res.status(400).json({ success: false, error: "UID e e-mail são obrigatórios" });
+      }
+
+      const logins = getStoredLogins();
+      const existingIndex = logins.findIndex(u => u.uid === uid || u.email.toLowerCase() === email.toLowerCase());
+      const now = new Date().toISOString();
+
+      if (existingIndex >= 0) {
+        const existing = logins[existingIndex];
+        const usage = calculateUsage(existing.createdAt);
+
+        // Se estiver banido
+        if (existing.isBanned) {
+          return res.status(403).json({
+            success: false,
+            isBanned: true,
+            isDisconnected: true,
+            isExpired: usage.isExpired,
+            message: "Esta conta foi banida pelo administrador do sistema."
+          });
+        }
+
+        // Se expirou o limite de 365 dias
+        if (usage.isExpired) {
+          return res.status(403).json({
+            success: false,
+            isBanned: false,
+            isDisconnected: true,
+            isExpired: true,
+            message: "O período de uso desta conta atingiu o limite de 365 dias (1 ano)."
+          });
+        }
+
+        // Ao fazer login novamente, limpa a flag de desconectado
+        existing.lastLoginAt = now;
+        existing.lastActiveAt = now;
+        existing.loginCount = (existing.loginCount || 1) + 1;
+        existing.isDisconnected = false;
+        existing.name = name || existing.name;
+        existing.phone = phone !== undefined ? phone : existing.phone;
+        existing.targetCourse = targetCourse || existing.targetCourse;
+        existing.targetScore = targetScore || existing.targetScore;
+        existing.userAgent = req.headers["user-agent"] || existing.userAgent;
+        if (type) existing.type = type;
+
+        logins[existingIndex] = existing;
+        saveStoredLogins(logins);
+
+        return res.json({
+          success: true,
+          user: {
+            ...existing,
+            ...usage
+          }
+        });
+      }
+
+      // Novo login/cadastro
+      const newRecord: UserLoginRecord = {
+        uid,
+        email,
+        name: name || email.split("@")[0] || "Estudante",
+        phone: phone || "",
+        targetCourse: targetCourse || "Medicina",
+        targetScore: targetScore || 750,
+        type: type || (email.includes("convidado") ? "guest" : "auth"),
+        createdAt: now,
+        lastLoginAt: now,
+        lastActiveAt: now,
+        loginCount: 1,
+        isBanned: false,
+        isDisconnected: false,
+        userAgent: req.headers["user-agent"] || ""
+      };
+
+      logins.unshift(newRecord);
+      saveStoredLogins(logins);
+
+      const usage = calculateUsage(newRecord.createdAt);
+      return res.json({
+        success: true,
+        user: {
+          ...newRecord,
+          ...usage
+        }
+      });
+    } catch (err: any) {
+      console.error("Erro em /api/auth/record-login:", err);
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  // 2. Verificar status da sessão (para desconexão imediata ou checagem de ban/expiração)
+  app.post("/api/auth/check-status", (req, res) => {
+    try {
+      const { uid, email } = req.body;
+      if (!uid && !email) {
+        return res.json({ isBanned: false, isDisconnected: false, isExpired: false });
+      }
+
+      const logins = getStoredLogins();
+      const user = logins.find(u => (uid && u.uid === uid) || (email && u.email.toLowerCase() === email.toLowerCase()));
+
+      if (!user) {
+        return res.json({ isBanned: false, isDisconnected: false, isExpired: false });
+      }
+
+      const usage = calculateUsage(user.createdAt);
+      // Atualiza lastActiveAt
+      user.lastActiveAt = new Date().toISOString();
+      saveStoredLogins(logins);
+
+      return res.json({
+        isBanned: user.isBanned,
+        isDisconnected: user.isDisconnected,
+        isExpired: usage.isExpired,
+        daysUsing: usage.daysUsing,
+        daysRemaining: usage.daysRemaining,
+        timeUsingFormatted: usage.timeUsingFormatted,
+        limitDays: LIMIT_DAYS
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // 3. Autenticação do Administrador
+  app.post("/api/admin/auth", (req, res) => {
+    const { password } = req.body;
+    if (password === ADMIN_PASSWORD) {
+      return res.json({ success: true });
+    }
+    return res.status(401).json({ success: false, error: "Senha administrativa incorreta" });
+  });
+
+  // Middleware de autorização para o painel admin
+  const checkAdminAuth = (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    const password = req.headers["x-admin-password"] || req.query.password || req.body.password;
+    if (password === ADMIN_PASSWORD) {
+      return next();
+    }
+    return res.status(401).json({ success: false, error: "Acesso não autorizado. Senha de administrador incorreta." });
+  };
+
+  // 4. Listar todos os logins e cadastros
+  app.get("/api/admin/users", checkAdminAuth, (req, res) => {
+    try {
+      const logins = getStoredLogins();
+      
+      const enrichedUsers = logins.map(user => {
+        const usage = calculateUsage(user.createdAt);
+        
+        let status: "active" | "disconnected" | "banned" | "expired" = "active";
+        if (user.isBanned) {
+          status = "banned";
+        } else if (usage.isExpired) {
+          status = "expired";
+        } else if (user.isDisconnected) {
+          status = "disconnected";
+        }
+
+        return {
+          ...user,
+          ...usage,
+          status
+        };
+      });
+
+      // Ordenar por último login (mais recentes primeiro)
+      enrichedUsers.sort((a, b) => new Date(b.lastLoginAt).getTime() - new Date(a.lastLoginAt).getTime());
+
+      res.json({
+        success: true,
+        users: enrichedUsers,
+        totalLogins: enrichedUsers.length,
+        stats: {
+          total: enrichedUsers.length,
+          active: enrichedUsers.filter(u => u.status === "active").length,
+          disconnected: enrichedUsers.filter(u => u.status === "disconnected").length,
+          banned: enrichedUsers.filter(u => u.status === "banned").length,
+          expired: enrichedUsers.filter(u => u.status === "expired").length
+        }
+      });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  // 5. Desconectar usuário
+  app.post("/api/admin/disconnect", checkAdminAuth, (req, res) => {
+    try {
+      const { uid } = req.body;
+      if (!uid) {
+        return res.status(400).json({ success: false, error: "UID é obrigatório" });
+      }
+
+      const logins = getStoredLogins();
+      const user = logins.find(u => u.uid === uid);
+      if (!user) {
+        return res.status(404).json({ success: false, error: "Usuário não encontrado" });
+      }
+
+      user.isDisconnected = true;
+      user.disconnectedAt = new Date().toISOString();
+      saveStoredLogins(logins);
+
+      res.json({ success: true, message: `Usuário ${user.name} desconectado com sucesso.` });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  // 6. Reconectar usuário (remover flag de desconexão forçada)
+  app.post("/api/admin/reconnect", checkAdminAuth, (req, res) => {
+    try {
+      const { uid } = req.body;
+      if (!uid) {
+        return res.status(400).json({ success: false, error: "UID é obrigatório" });
+      }
+
+      const logins = getStoredLogins();
+      const user = logins.find(u => u.uid === uid);
+      if (!user) {
+        return res.status(404).json({ success: false, error: "Usuário não encontrado" });
+      }
+
+      user.isDisconnected = false;
+      user.disconnectedAt = undefined;
+      saveStoredLogins(logins);
+
+      res.json({ success: true, message: `Sessão de ${user.name} restabelecida.` });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  // 7. Banir ou Desbanir usuário
+  app.post("/api/admin/ban", checkAdminAuth, (req, res) => {
+    try {
+      const { uid, banned, reason } = req.body;
+      if (!uid) {
+        return res.status(400).json({ success: false, error: "UID é obrigatório" });
+      }
+
+      const shouldBan = banned !== false;
+      const logins = getStoredLogins();
+      const user = logins.find(u => u.uid === uid);
+      if (!user) {
+        return res.status(404).json({ success: false, error: "Usuário não encontrado" });
+      }
+
+      user.isBanned = shouldBan;
+      user.bannedAt = shouldBan ? new Date().toISOString() : undefined;
+      user.banReason = shouldBan ? (reason || "Violação das regras de acesso") : undefined;
+      if (shouldBan) {
+        user.isDisconnected = true;
+      }
+
+      saveStoredLogins(logins);
+
+      res.json({ 
+        success: true, 
+        message: shouldBan ? `Usuário ${user.name} banido com sucesso.` : `Banimento de ${user.name} revogado.` 
+      });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  // 8. Resetar prazo de 365 dias (renovar acesso)
+  app.post("/api/admin/reset-time", checkAdminAuth, (req, res) => {
+    try {
+      const { uid } = req.body;
+      const logins = getStoredLogins();
+      const user = logins.find(u => u.uid === uid);
+      if (!user) {
+        return res.status(404).json({ success: false, error: "Usuário não encontrado" });
+      }
+
+      user.createdAt = new Date().toISOString();
+      user.isDisconnected = false;
+      saveStoredLogins(logins);
+
+      res.json({ success: true, message: `Prazo de 365 dias de ${user.name} renovado com sucesso.` });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  // 9. Excluir registro do histórico
+  app.post("/api/admin/delete-user", checkAdminAuth, (req, res) => {
+    try {
+      const { uid } = req.body;
+      let logins = getStoredLogins();
+      const filtered = logins.filter(u => u.uid !== uid);
+      saveStoredLogins(filtered);
+      res.json({ success: true, message: "Registro removido com sucesso." });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
     }
   });
 
