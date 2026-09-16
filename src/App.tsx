@@ -623,7 +623,11 @@ export default function App() {
   if (!userProfile || !userProfile.isLeadCaptured) {
     return (
       <>
-        <LeadCapture onCapture={handleCaptureLead} alertMessage={sessionAlertMessage} />
+        <LeadCapture 
+          onCapture={handleCaptureLead} 
+          alertMessage={sessionAlertMessage} 
+          onOpenAdmin={() => setIsAdminOpen(true)}
+        />
         <AdminModal isOpen={isAdminOpen} onClose={() => setIsAdminOpen(false)} />
       </>
     );

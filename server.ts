@@ -344,6 +344,7 @@ async function startServer() {
     uid: string;
     email: string;
     name: string;
+    password?: string;
     phone?: string;
     targetCourse?: string;
     targetScore?: number;
@@ -358,6 +359,20 @@ async function startServer() {
     isDisconnected: boolean;
     disconnectedAt?: string;
     userAgent?: string;
+  }
+
+  function isDemoUser(u: Partial<UserLoginRecord>): boolean {
+    if (!u) return false;
+    const uid = u.uid || "";
+    const email = (u.email || "").toLowerCase();
+    return (
+      uid.startsWith("usr_demo_") ||
+      uid.startsWith("guest_demo_") ||
+      uid === "test_123" ||
+      email === "lucas.medicina@gmail.com" ||
+      email === "mariana.direito@outlook.com" ||
+      email === "rodrigo.expirado@gmail.com"
+    );
   }
 
   function ensureDataDir(): void {
@@ -378,7 +393,13 @@ async function startServer() {
     try {
       if (!fs.existsSync(LOGINS_FILE)) return [];
       const content = fs.readFileSync(LOGINS_FILE, "utf-8");
-      return JSON.parse(content || "[]");
+      const records: UserLoginRecord[] = JSON.parse(content || "[]");
+      // Purge any demo accounts that might exist
+      const cleaned = records.filter(u => !isDemoUser(u));
+      if (cleaned.length !== records.length) {
+        saveStoredLogins(cleaned);
+      }
+      return cleaned;
     } catch (e) {
       console.error("Erro ao ler admin_logins.json:", e);
       return [];
@@ -388,7 +409,8 @@ async function startServer() {
   function saveStoredLogins(records: UserLoginRecord[]): boolean {
     ensureDataDir();
     try {
-      fs.writeFileSync(LOGINS_FILE, JSON.stringify(records, null, 2), "utf-8");
+      const cleaned = records.filter(u => !isDemoUser(u));
+      fs.writeFileSync(LOGINS_FILE, JSON.stringify(cleaned, null, 2), "utf-8");
       return true;
     } catch (e) {
       console.error("Erro ao salvar admin_logins.json:", e);
@@ -438,77 +460,40 @@ async function startServer() {
     };
   }
 
-  // 1. Gravar ou atualizar login de usuário
-  app.post("/api/auth/record-login", (req, res) => {
+  // 1. Cadastrar novo usuário (Registro oficial no banco de dados)
+  app.post("/api/auth/register", (req, res) => {
     try {
-      const { uid, email, name, phone, targetCourse, targetScore, type } = req.body;
-      if (!uid || !email) {
-        return res.status(400).json({ success: false, error: "UID e e-mail são obrigatórios" });
+      const { name, email, password, phone, targetCourse, targetScore } = req.body;
+      if (!email || !password) {
+        return res.status(400).json({ success: false, error: "E-mail e senha são obrigatórios." });
+      }
+
+      const normalizedEmail = email.trim().toLowerCase();
+      if (password.length < 6) {
+        return res.status(400).json({ success: false, error: "A senha deve conter no mínimo 6 caracteres." });
       }
 
       const logins = getStoredLogins();
-      const existingIndex = logins.findIndex(u => u.uid === uid || u.email.toLowerCase() === email.toLowerCase());
-      const now = new Date().toISOString();
-
-      if (existingIndex >= 0) {
-        const existing = logins[existingIndex];
-        const usage = calculateUsage(existing.createdAt);
-
-        // Se estiver banido
-        if (existing.isBanned) {
-          return res.status(403).json({
-            success: false,
-            isBanned: true,
-            isDisconnected: true,
-            isExpired: usage.isExpired,
-            message: "Esta conta foi banida pelo administrador do sistema."
-          });
-        }
-
-        // Se expirou o limite de 365 dias
-        if (usage.isExpired) {
-          return res.status(403).json({
-            success: false,
-            isBanned: false,
-            isDisconnected: true,
-            isExpired: true,
-            message: "O período de uso desta conta atingiu o limite de 365 dias (1 ano)."
-          });
-        }
-
-        // Ao fazer login novamente, limpa a flag de desconectado
-        existing.lastLoginAt = now;
-        existing.lastActiveAt = now;
-        existing.loginCount = (existing.loginCount || 1) + 1;
-        existing.isDisconnected = false;
-        existing.name = name || existing.name;
-        existing.phone = phone !== undefined ? phone : existing.phone;
-        existing.targetCourse = targetCourse || existing.targetCourse;
-        existing.targetScore = targetScore || existing.targetScore;
-        existing.userAgent = req.headers["user-agent"] || existing.userAgent;
-        if (type) existing.type = type;
-
-        logins[existingIndex] = existing;
-        saveStoredLogins(logins);
-
-        return res.json({
-          success: true,
-          user: {
-            ...existing,
-            ...usage
-          }
+      const existingUser = logins.find(u => u.email.toLowerCase() === normalizedEmail);
+      if (existingUser) {
+        return res.status(400).json({ 
+          success: false, 
+          error: "Este e-mail já está cadastrado. Faça login com suas credenciais." 
         });
       }
 
-      // Novo login/cadastro
+      const now = new Date().toISOString();
+      const uid = "usr_" + Date.now() + "_" + Math.random().toString(36).substring(2, 6);
+
       const newRecord: UserLoginRecord = {
         uid,
-        email,
-        name: name || email.split("@")[0] || "Estudante",
-        phone: phone || "",
+        email: normalizedEmail,
+        name: (name && name.trim()) || normalizedEmail.split("@")[0] || "Estudante",
+        password: String(password).trim(),
+        phone: (phone && phone.trim()) || "",
         targetCourse: targetCourse || "Medicina",
-        targetScore: targetScore || 750,
-        type: type || (email.includes("convidado") ? "guest" : "auth"),
+        targetScore: Number(targetScore) || 750,
+        type: "auth",
         createdAt: now,
         lastLoginAt: now,
         lastActiveAt: now,
@@ -522,10 +507,185 @@ async function startServer() {
       saveStoredLogins(logins);
 
       const usage = calculateUsage(newRecord.createdAt);
+      // Retorna sem expor o campo de senha
+      const { password: _, ...safeUser } = newRecord;
+
       return res.json({
         success: true,
         user: {
-          ...newRecord,
+          ...safeUser,
+          ...usage
+        }
+      });
+    } catch (err: any) {
+      console.error("Erro em /api/auth/register:", err);
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  // 2. Autenticação de usuário (Login oficial no banco de dados)
+  app.post("/api/auth/login", (req, res) => {
+    try {
+      const { email, password } = req.body;
+      if (!email || !password) {
+        return res.status(400).json({ success: false, error: "E-mail e senha são obrigatórios." });
+      }
+
+      const normalizedEmail = email.trim().toLowerCase();
+      const logins = getStoredLogins();
+      const user = logins.find(u => u.email.toLowerCase() === normalizedEmail);
+
+      if (!user) {
+        return res.status(401).json({ 
+          success: false, 
+          error: "Nenhuma conta encontrada com este e-mail. Por favor, crie sua conta primeiro." 
+        });
+      }
+
+      // Se usuário tem senha cadastrada, validar
+      if (user.password && user.password !== String(password).trim()) {
+        return res.status(401).json({ success: false, error: "Senha incorreta. Verifique seus dados." });
+      } else if (!user.password) {
+        // Se ainda não tinha senha salva (migração), memoriza
+        user.password = String(password).trim();
+      }
+
+      const usage = calculateUsage(user.createdAt);
+
+      if (user.isBanned) {
+        return res.status(403).json({
+          success: false,
+          isBanned: true,
+          isDisconnected: true,
+          error: "Esta conta foi suspensa ou banida pelo administrador do sistema."
+        });
+      }
+
+      if (usage.isExpired) {
+        return res.status(403).json({
+          success: false,
+          isExpired: true,
+          isDisconnected: true,
+          error: "O período limite de uso de 365 dias (1 ano) expirou para esta conta."
+        });
+      }
+
+      const now = new Date().toISOString();
+      user.lastLoginAt = now;
+      user.lastActiveAt = now;
+      user.loginCount = (user.loginCount || 1) + 1;
+      user.isDisconnected = false;
+      user.userAgent = req.headers["user-agent"] || user.userAgent;
+
+      saveStoredLogins(logins);
+
+      const { password: _, ...safeUser } = user;
+      return res.json({
+        success: true,
+        user: {
+          ...safeUser,
+          ...usage
+        }
+      });
+    } catch (err: any) {
+      console.error("Erro em /api/auth/login:", err);
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  // 3. Gravar ou atualizar login de usuário (Google OAuth, F2 Convidado ou sincronização)
+  app.post("/api/auth/record-login", (req, res) => {
+    try {
+      const { uid, email, name, phone, targetCourse, targetScore, type } = req.body;
+      if (!uid || !email) {
+        return res.status(400).json({ success: false, error: "UID e e-mail são obrigatórios" });
+      }
+
+      const normalizedEmail = email.trim().toLowerCase();
+      // Não registrar contas de teste ou demo
+      if (isDemoUser({ uid, email: normalizedEmail })) {
+        return res.json({ success: true });
+      }
+
+      const logins = getStoredLogins();
+      const existingIndex = logins.findIndex(u => u.uid === uid || u.email.toLowerCase() === normalizedEmail);
+      const now = new Date().toISOString();
+
+      if (existingIndex >= 0) {
+        const existing = logins[existingIndex];
+        const usage = calculateUsage(existing.createdAt);
+
+        if (existing.isBanned) {
+          return res.status(403).json({
+            success: false,
+            isBanned: true,
+            isDisconnected: true,
+            isExpired: usage.isExpired,
+            message: "Esta conta foi banida pelo administrador do sistema."
+          });
+        }
+
+        if (usage.isExpired) {
+          return res.status(403).json({
+            success: false,
+            isBanned: false,
+            isDisconnected: true,
+            isExpired: true,
+            message: "O período de uso desta conta atingiu o limite de 365 dias (1 ano)."
+          });
+        }
+
+        existing.lastLoginAt = now;
+        existing.lastActiveAt = now;
+        existing.loginCount = (existing.loginCount || 1) + 1;
+        existing.isDisconnected = false;
+        existing.name = name || existing.name;
+        if (phone !== undefined && phone) existing.phone = phone;
+        if (targetCourse) existing.targetCourse = targetCourse;
+        if (targetScore) existing.targetScore = targetScore;
+        existing.userAgent = req.headers["user-agent"] || existing.userAgent;
+        if (type) existing.type = type;
+
+        logins[existingIndex] = existing;
+        saveStoredLogins(logins);
+
+        const { password: _, ...safeUser } = existing;
+        return res.json({
+          success: true,
+          user: {
+            ...safeUser,
+            ...usage
+          }
+        });
+      }
+
+      // Novo login/cadastro
+      const newRecord: UserLoginRecord = {
+        uid,
+        email: normalizedEmail,
+        name: name || normalizedEmail.split("@")[0] || "Estudante",
+        phone: phone || "",
+        targetCourse: targetCourse || "Medicina",
+        targetScore: targetScore || 750,
+        type: type || (normalizedEmail.includes("convidado") ? "guest" : "auth"),
+        createdAt: now,
+        lastLoginAt: now,
+        lastActiveAt: now,
+        loginCount: 1,
+        isBanned: false,
+        isDisconnected: false,
+        userAgent: req.headers["user-agent"] || ""
+      };
+
+      logins.unshift(newRecord);
+      saveStoredLogins(logins);
+
+      const usage = calculateUsage(newRecord.createdAt);
+      const { password: _, ...safeUser } = newRecord;
+      return res.json({
+        success: true,
+        user: {
+          ...safeUser,
           ...usage
         }
       });
@@ -749,6 +909,74 @@ async function startServer() {
       const filtered = logins.filter(u => u.uid !== uid);
       saveStoredLogins(filtered);
       res.json({ success: true, message: "Registro removido com sucesso." });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  // 10. Criar usuário manualmente pelo painel administrativo
+  app.post("/api/admin/create-user", checkAdminAuth, (req, res) => {
+    try {
+      const { name, email, password, phone, targetCourse, targetScore } = req.body;
+      if (!email) {
+        return res.status(400).json({ success: false, error: "E-mail é obrigatório." });
+      }
+
+      const normalizedEmail = email.trim().toLowerCase();
+      const logins = getStoredLogins();
+      if (logins.some(u => u.email.toLowerCase() === normalizedEmail)) {
+        return res.status(400).json({ success: false, error: "Este e-mail já existe no banco de dados." });
+      }
+
+      const now = new Date().toISOString();
+      const uid = "usr_" + Date.now() + "_" + Math.random().toString(36).substring(2, 6);
+      const userPass = (password && String(password).trim()) || "enem1234";
+
+      const newRecord: UserLoginRecord = {
+        uid,
+        email: normalizedEmail,
+        name: (name && name.trim()) || normalizedEmail.split("@")[0] || "Estudante",
+        password: userPass,
+        phone: (phone && phone.trim()) || "",
+        targetCourse: targetCourse || "Medicina",
+        targetScore: Number(targetScore) || 750,
+        type: "auth",
+        createdAt: now,
+        lastLoginAt: now,
+        lastActiveAt: now,
+        loginCount: 1,
+        isBanned: false,
+        isDisconnected: false,
+        userAgent: "Criado pelo Administrador"
+      };
+
+      logins.unshift(newRecord);
+      saveStoredLogins(logins);
+
+      const usage = calculateUsage(newRecord.createdAt);
+      const { password: _, ...safeUser } = newRecord;
+
+      res.json({
+        success: true,
+        message: `Conta de ${newRecord.name} criada com sucesso no banco de dados!`,
+        user: {
+          ...safeUser,
+          ...usage,
+          status: "active"
+        }
+      });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  // 11. Limpar todas as contas de teste/demo definitivamente
+  app.post("/api/admin/purge-demos", checkAdminAuth, (req, res) => {
+    try {
+      const logins = getStoredLogins();
+      const cleaned = logins.filter(u => !isDemoUser(u));
+      saveStoredLogins(cleaned);
+      res.json({ success: true, count: cleaned.length, message: "Contas de demonstração removidas com sucesso." });
     } catch (err: any) {
       res.status(500).json({ success: false, error: err.message });
     }

@@ -27,20 +27,12 @@ import {
   onSnapshot
 } from "firebase/firestore";
 
-// Read Firebase config from the configuration JSON
-const firebaseConfig = {
-  apiKey: "AIzaSyDBlBHkpmUcUEJfOd3nZ27k_AH6QwDDwuA",
-  authDomain: "gen-lang-client-0153999076.firebaseapp.com",
-  projectId: "gen-lang-client-0153999076",
-  storageBucket: "gen-lang-client-0153999076.firebasestorage.app",
-  messagingSenderId: "1018680352902",
-  appId: "1:1018680352902:web:05820fa8203aa73cafb107"
-};
+import firebaseConfig from "../../firebase-applet-config.json";
 
 // Initialize Firebase
 const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
 const auth = getAuth(app);
-const db = getFirestore(app);
+const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
 
 const googleProvider = new GoogleAuthProvider();
 

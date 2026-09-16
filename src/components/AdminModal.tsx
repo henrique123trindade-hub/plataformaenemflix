@@ -21,7 +21,8 @@ import {
   Eye,
   EyeOff,
   Users,
-  Compass
+  Compass,
+  UserPlus
 } from "lucide-react";
 
 interface AdminUser {
@@ -54,6 +55,20 @@ interface AdminModalProps {
   onClose: () => void;
 }
 
+function isDemoAdminUser(u: Partial<AdminUser>): boolean {
+  if (!u) return false;
+  const uid = u.uid || "";
+  const email = (u.email || "").toLowerCase();
+  return (
+    uid.startsWith("usr_demo_") ||
+    uid.startsWith("guest_demo_") ||
+    uid === "test_123" ||
+    email === "lucas.medicina@gmail.com" ||
+    email === "mariana.direito@outlook.com" ||
+    email === "rodrigo.expirado@gmail.com"
+  );
+}
+
 export default function AdminModal({ isOpen, onClose }: AdminModalProps) {
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(() => {
     return sessionStorage.getItem("enemflix_admin_auth") === "true";
@@ -70,25 +85,53 @@ export default function AdminModal({ isOpen, onClose }: AdminModalProps) {
   const [actionMessage, setActionMessage] = useState<{ text: string; type: "success" | "error" } | null>(null);
   const [copiedUid, setCopiedUid] = useState<string | null>(null);
 
+  // Manual user registration modal state
+  const [showAddModal, setShowAddModal] = useState(false);
+  const [newName, setNewName] = useState("");
+  const [newEmail, setNewEmail] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [newPhone, setNewPhone] = useState("");
+  const [newCourse, setNewCourse] = useState("Medicina");
+  const [newScore, setNewScore] = useState(750);
+  const [isCreatingUser, setIsCreatingUser] = useState(false);
+  const [createError, setCreateError] = useState("");
+
+  // Purge any stale demo cache on initial mount
+  useEffect(() => {
+    try {
+      const cached = localStorage.getItem("enemflix_admin_users_cache");
+      if (cached && (cached.includes("usr_demo_") || cached.includes("Lucas Silva") || cached.includes("guest_demo_") || cached.includes("test_123"))) {
+        localStorage.removeItem("enemflix_admin_users_cache");
+      }
+    } catch (e) {}
+  }, []);
+
   // esc key listener to close
   useEffect(() => {
     if (!isOpen) return;
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
-        onClose();
+        if (showAddModal) {
+          setShowAddModal(false);
+        } else {
+          onClose();
+        }
       }
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [isOpen, onClose]);
+  }, [isOpen, onClose, showAddModal]);
 
-  // Fallback users helper
+  // Fallback users helper (strictly real accounts, never fake examples)
   const getFallbackUsers = (): AdminUser[] => {
     try {
       const cached = localStorage.getItem("enemflix_admin_users_cache");
       if (cached) {
         const parsed = JSON.parse(cached);
-        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+        if (Array.isArray(parsed)) {
+          const clean = parsed.filter(u => !isDemoAdminUser(u));
+          return clean;
+        }
       }
     } catch (e) {}
 
@@ -97,7 +140,7 @@ export default function AdminModal({ isOpen, onClose }: AdminModalProps) {
     if (localUserRaw) {
       try {
         const p = JSON.parse(localUserRaw);
-        if (p && p.uid) {
+        if (p && p.uid && !isDemoAdminUser(p)) {
           fallbackList.push({
             uid: p.uid,
             email: p.email || "aluno@enemflix.com",
@@ -123,72 +166,6 @@ export default function AdminModal({ isOpen, onClose }: AdminModalProps) {
       } catch (e) {}
     }
 
-    fallbackList.push(
-      {
-        uid: "usr_demo_101",
-        email: "lucas.medicina@gmail.com",
-        name: "Lucas Silva Santos",
-        phone: "(11) 98765-4321",
-        targetCourse: "Medicina",
-        targetScore: 810,
-        type: "auth",
-        createdAt: new Date(Date.now() - 92 * 86400000).toISOString(),
-        lastLoginAt: new Date(Date.now() - 3600000 * 2).toISOString(),
-        lastActiveAt: new Date(Date.now() - 3600000 * 2).toISOString(),
-        loginCount: 48,
-        isBanned: false,
-        isDisconnected: false,
-        daysUsing: 92,
-        daysRemaining: 273,
-        isExpired: false,
-        progressPercentage: 25,
-        timeUsingFormatted: "92 dias e 10h",
-        status: "active"
-      },
-      {
-        uid: "usr_demo_102",
-        email: "mariana.direito@outlook.com",
-        name: "Mariana Souza",
-        phone: "(21) 97654-3210",
-        targetCourse: "Direito",
-        targetScore: 760,
-        type: "auth",
-        createdAt: new Date(Date.now() - 340 * 86400000).toISOString(),
-        lastLoginAt: new Date(Date.now() - 86400000).toISOString(),
-        lastActiveAt: new Date(Date.now() - 86400000).toISOString(),
-        loginCount: 112,
-        isBanned: false,
-        isDisconnected: false,
-        daysUsing: 340,
-        daysRemaining: 25,
-        isExpired: false,
-        progressPercentage: 93,
-        timeUsingFormatted: "340 dias e 15h",
-        status: "active"
-      },
-      {
-        uid: "usr_demo_103",
-        email: "rodrigo.expirado@gmail.com",
-        name: "Rodrigo Ramos",
-        phone: "(31) 99123-4567",
-        targetCourse: "Engenharia",
-        targetScore: 720,
-        type: "auth",
-        createdAt: new Date(Date.now() - 410 * 86400000).toISOString(),
-        lastLoginAt: new Date(Date.now() - 86400000 * 5).toISOString(),
-        lastActiveAt: new Date(Date.now() - 86400000 * 5).toISOString(),
-        loginCount: 64,
-        isBanned: false,
-        isDisconnected: false,
-        daysUsing: 410,
-        daysRemaining: 0,
-        isExpired: true,
-        progressPercentage: 100,
-        timeUsingFormatted: "410 dias (Expirado)",
-        status: "expired"
-      }
-    );
-
     return fallbackList;
   };
 
@@ -202,16 +179,20 @@ export default function AdminModal({ isOpen, onClose }: AdminModalProps) {
         }
       });
       const data = await res.json();
-      if (data.success && Array.isArray(data.users) && data.users.length > 0) {
-        setUsers(data.users);
+      if (data.success && Array.isArray(data.users)) {
+        // Leave strictly real accounts created in database
+        const cleanUsers = data.users.filter((u: AdminUser) => !isDemoAdminUser(u));
+        setUsers(cleanUsers);
         try {
-          localStorage.setItem("enemflix_admin_users_cache", JSON.stringify(data.users));
+          localStorage.setItem("enemflix_admin_users_cache", JSON.stringify(cleanUsers));
         } catch (e) {}
       } else {
-        setUsers(getFallbackUsers());
+        const fallback = getFallbackUsers();
+        setUsers(fallback);
       }
     } catch (err) {
-      setUsers(getFallbackUsers());
+      const fallback = getFallbackUsers();
+      setUsers(fallback);
     } finally {
       setIsLoading(false);
     }
@@ -477,6 +458,59 @@ export default function AdminModal({ isOpen, onClose }: AdminModalProps) {
     };
   }, [users]);
 
+  const handleCreateUser = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newEmail.trim() || !newPassword.trim() || !newName.trim()) {
+      setCreateError("Por favor, preencha nome, e-mail e senha.");
+      return;
+    }
+    if (newPassword.trim().length < 6) {
+      setCreateError("A senha deve conter no mínimo 6 caracteres.");
+      return;
+    }
+
+    setIsCreatingUser(true);
+    setCreateError("");
+    try {
+      const res = await fetch("/api/admin/create-user", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-admin-password": "pirulitobaby"
+        },
+        body: JSON.stringify({
+          name: newName.trim(),
+          email: newEmail.trim(),
+          password: newPassword.trim(),
+          phone: newPhone.trim(),
+          targetCourse: newCourse,
+          targetScore: Number(newScore) || 750
+        })
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        setCreateError(data.error || "Não foi possível cadastrar o usuário.");
+        return;
+      }
+
+      setActionMessage({
+        text: `Usuário ${newName.trim()} cadastrado com sucesso no banco de dados!`,
+        type: "success"
+      });
+      setTimeout(() => setActionMessage(null), 4000);
+      setShowAddModal(false);
+      setNewName("");
+      setNewEmail("");
+      setNewPassword("");
+      setNewPhone("");
+      fetchUsers();
+    } catch (err) {
+      setCreateError("Erro ao conectar com o servidor para criar o usuário.");
+    } finally {
+      setIsCreatingUser(false);
+    }
+  };
+
   if (!isOpen) return null;
 
   return (
@@ -585,6 +619,17 @@ export default function AdminModal({ isOpen, onClose }: AdminModalProps) {
             </div>
 
             <div className="flex items-center gap-2 self-end sm:self-auto">
+              <button
+                onClick={() => {
+                  setCreateError("");
+                  setShowAddModal(true);
+                }}
+                className="px-3 py-1.5 bg-[#e50914] hover:bg-[#b80710] text-white rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer shadow"
+              >
+                <UserPlus className="w-3.5 h-3.5" />
+                <span>+ Novo Usuário</span>
+              </button>
+
               <button
                 onClick={fetchUsers}
                 disabled={isLoading}
@@ -752,12 +797,30 @@ export default function AdminModal({ isOpen, onClose }: AdminModalProps) {
                 <p className="text-xs">Carregando registros de login...</p>
               </div>
             ) : filteredUsers.length === 0 ? (
-              <div className="flex flex-col items-center justify-center py-16 text-zinc-500 text-center">
-                <UserX className="w-10 h-10 mb-3 opacity-40" />
-                <p className="text-sm font-bold text-zinc-300">Nenhum login encontrado</p>
-                <p className="text-xs text-zinc-500 mt-1">
-                  {searchTerm ? "Tente alterar os termos de busca." : "Nenhum usuário cadastrado nesta categoria."}
+              <div className="flex flex-col items-center justify-center py-16 text-zinc-500 text-center max-w-md mx-auto px-4">
+                <div className="w-14 h-14 rounded-2xl bg-zinc-900 border border-white/10 flex items-center justify-center text-zinc-400 mb-3 shadow-lg">
+                  <Users className="w-7 h-7 text-zinc-400" />
+                </div>
+                <p className="text-base font-bold text-zinc-200">
+                  {searchTerm ? "Nenhum usuário encontrado na busca" : "Nenhum usuário no banco de dados"}
                 </p>
+                <p className="text-xs text-zinc-400 mt-1.5 leading-relaxed">
+                  {searchTerm
+                    ? "Tente alterar os termos da busca para localizar o aluno desejado."
+                    : "Os exemplos foram removidos. Apenas as contas reais criadas pelos alunos no site ou adicionadas pelo painel aparecerão aqui."}
+                </p>
+                {!searchTerm && (
+                  <button
+                    onClick={() => {
+                      setCreateError("");
+                      setShowAddModal(true);
+                    }}
+                    className="mt-5 px-4 py-2 bg-[#e50914] hover:bg-[#b80710] text-white text-xs font-bold rounded-xl transition flex items-center gap-2 shadow-lg shadow-[#e50914]/20 cursor-pointer"
+                  >
+                    <UserPlus className="w-4 h-4" />
+                    <span>Cadastrar Primeiro Usuário</span>
+                  </button>
+                )}
               </div>
             ) : (
               filteredUsers.map((user) => {
@@ -971,6 +1034,126 @@ export default function AdminModal({ isOpen, onClose }: AdminModalProps) {
             </div>
           </div>
 
+        </div>
+      )}
+
+      {/* 3. MODAL ADICIONAR NOVO USUÁRIO */}
+      {showAddModal && (
+        <div className="fixed inset-0 z-60 flex items-center justify-center bg-black/80 backdrop-blur-md p-4 animate-in fade-in duration-150">
+          <div className="w-full max-w-md bg-[#161616] border border-white/10 rounded-2xl p-6 shadow-2xl relative">
+            <button
+              onClick={() => setShowAddModal(false)}
+              className="absolute top-4 right-4 text-zinc-500 hover:text-white transition p-1 rounded-lg"
+              title="Fechar"
+            >
+              <X className="w-5 h-5" />
+            </button>
+
+            <div className="flex items-center gap-3 mb-5">
+              <div className="w-10 h-10 rounded-xl bg-[#e50914]/20 border border-[#e50914]/40 flex items-center justify-center text-[#e50914] shrink-0">
+                <UserPlus className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-white">Cadastrar Novo Usuário</h3>
+                <p className="text-xs text-zinc-400">Adicione uma nova conta diretamente ao banco de dados</p>
+              </div>
+            </div>
+
+            {createError && (
+              <div className="mb-4 p-3 bg-red-950/40 border border-red-800/40 rounded-xl text-red-400 text-xs">
+                {createError}
+              </div>
+            )}
+
+            <form onSubmit={handleCreateUser} className="space-y-3.5">
+              <div>
+                <label className="block text-xs font-semibold text-zinc-300 mb-1">Nome Completo</label>
+                <input
+                  type="text"
+                  required
+                  placeholder="Ex: Ana Clara Ribeiro"
+                  value={newName}
+                  onChange={(e) => setNewName(e.target.value)}
+                  className="w-full bg-black/60 border border-white/10 rounded-xl py-2.5 px-3 text-xs text-white placeholder:text-zinc-600 focus:outline-none focus:border-[#e50914] focus:ring-1 focus:ring-[#e50914] transition"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-zinc-300 mb-1">E-mail</label>
+                <input
+                  type="email"
+                  required
+                  placeholder="aluno@email.com"
+                  value={newEmail}
+                  onChange={(e) => setNewEmail(e.target.value)}
+                  className="w-full bg-black/60 border border-white/10 rounded-xl py-2.5 px-3 text-xs text-white placeholder:text-zinc-600 focus:outline-none focus:border-[#e50914] focus:ring-1 focus:ring-[#e50914] transition"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-zinc-300 mb-1">Senha (Mínimo 6 dígitos)</label>
+                <input
+                  type="password"
+                  required
+                  placeholder="••••••••"
+                  value={newPassword}
+                  onChange={(e) => setNewPassword(e.target.value)}
+                  className="w-full bg-black/60 border border-white/10 rounded-xl py-2.5 px-3 text-xs text-white placeholder:text-zinc-600 focus:outline-none focus:border-[#e50914] focus:ring-1 focus:ring-[#e50914] transition"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-zinc-300 mb-1">Telefone / WhatsApp</label>
+                  <input
+                    type="text"
+                    placeholder="(11) 99999-9999"
+                    value={newPhone}
+                    onChange={(e) => setNewPhone(e.target.value)}
+                    className="w-full bg-black/60 border border-white/10 rounded-xl py-2.5 px-3 text-xs text-white placeholder:text-zinc-600 focus:outline-none focus:border-[#e50914] focus:ring-1 focus:ring-[#e50914] transition"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-zinc-300 mb-1">Curso Alvo</label>
+                  <select
+                    value={newCourse}
+                    onChange={(e) => setNewCourse(e.target.value)}
+                    className="w-full bg-black/60 border border-white/10 rounded-xl py-2.5 px-3 text-xs text-white focus:outline-none focus:border-[#e50914] transition"
+                  >
+                    <option value="Medicina">Medicina</option>
+                    <option value="Direito">Direito</option>
+                    <option value="Engenharia">Engenharia</option>
+                    <option value="Psicologia">Psicologia</option>
+                    <option value="Odontologia">Odontologia</option>
+                    <option value="Outro">Outro</option>
+                  </select>
+                </div>
+              </div>
+
+              <div className="pt-2 flex items-center justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowAddModal(false)}
+                  className="px-4 py-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded-xl text-xs font-semibold transition"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  disabled={isCreatingUser}
+                  className="px-4 py-2 bg-[#e50914] hover:bg-[#b80710] text-white rounded-xl text-xs font-bold transition flex items-center gap-1.5 shadow-lg shadow-[#e50914]/20 disabled:opacity-50"
+                >
+                  {isCreatingUser ? (
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <Check className="w-3.5 h-3.5" />
+                  )}
+                  <span>Salvar Usuário</span>
+                </button>
+              </div>
+            </form>
+          </div>
         </div>
       )}
 

@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { LeadProfile } from "../types";
-import { Sparkles, Mail, Lock, User as UserIcon, Phone as PhoneIcon, ArrowLeft, Eye, EyeOff } from "lucide-react";
+import { Sparkles, Mail, Lock, User as UserIcon, Phone as PhoneIcon, ArrowLeft, Eye, EyeOff, Shield } from "lucide-react";
 import { 
   auth, 
   db, 
@@ -15,9 +15,10 @@ import {
 interface LeadCaptureProps {
   onCapture: (profile: LeadProfile) => void;
   alertMessage?: string;
+  onOpenAdmin?: () => void;
 }
 
-export default function LeadCapture({ onCapture, alertMessage }: LeadCaptureProps) {
+export default function LeadCapture({ onCapture, alertMessage, onOpenAdmin }: LeadCaptureProps) {
   const [mode, setMode] = useState<"signin" | "signup" | "forgot">("signin");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -88,49 +89,56 @@ export default function LeadCapture({ onCapture, alertMessage }: LeadCaptureProp
     setIsLoading(true);
     setError("");
     try {
-      let uid = "usr_" + Date.now();
-      let authUserEmail = email;
+      // 1. Cadastrar diretamente no banco de dados do servidor
+      const regResponse = await fetch("/api/auth/register", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: name.trim(),
+          email: email.trim(),
+          password: password.trim(),
+          phone: phone.trim(),
+          targetCourse,
+          targetScore
+        })
+      });
 
+      const regData = await regResponse.json();
+      if (!regResponse.ok || !regData.success) {
+        setIsLoading(false);
+        setError(regData.error || "Não foi possível criar a conta. Tente novamente.");
+        return;
+      }
+
+      const serverUser = regData.user;
+      let finalUid = serverUser.uid;
+
+      // 2. Sincronizar em paralelo com Firebase Auth (se ativo)
       try {
-        const userCredential = await createUserWithEmailAndPassword(auth, email, password);
-        uid = userCredential.user.uid;
-        authUserEmail = userCredential.user.email || email;
-      } catch (authErr: any) {
-        console.warn("[Firebase Register Auth Warning]", authErr);
-        if (authErr.code === "auth/email-already-in-use") {
-          setIsLoading(false);
-          setError("Este e-mail já está em uso. Por favor, faça login ou utilize outro e-mail.");
-          return;
-        } else if (authErr.code === "auth/invalid-email") {
-          setIsLoading(false);
-          setError("O e-mail inserido é inválido. Verifique o formato e tente novamente.");
-          return;
-        } else if (authErr.code === "auth/weak-password") {
-          setIsLoading(false);
-          setError("A senha escolhida é fraca. Utilize pelo menos 6 caracteres.");
-          return;
-        }
-        // Fallback for auth/operation-not-allowed or general error
-        // Creates user profile smoothly so registration always succeeds
+        const userCredential = await createUserWithEmailAndPassword(auth, email.trim(), password);
+        finalUid = userCredential.user.uid;
+      } catch (fbErr: any) {
+        console.warn("[Firebase Register notice - conta salva com sucesso no banco]", fbErr);
       }
 
       const profile: LeadProfile = {
-        name,
-        email: authUserEmail,
-        phone,
-        targetCourse,
-        targetScore,
+        name: serverUser.name || name.trim(),
+        email: serverUser.email || email.trim(),
+        phone: serverUser.phone || phone.trim(),
+        targetCourse: serverUser.targetCourse || targetCourse,
+        targetScore: serverUser.targetScore || targetScore,
         isLeadCaptured: true,
-        uid,
-        createdAt: new Date().toISOString()
+        uid: finalUid,
+        createdAt: serverUser.createdAt || new Date().toISOString()
       };
 
-      // Save user profile in localStorage & Firestore
+      // 3. Salvar perfil localmente
       localStorage.setItem("enemflix_user_profile", JSON.stringify(profile));
 
+      // 4. Salvar documento no Firestore
       try {
         await Promise.race([
-          setDoc(doc(db, "users", uid), {
+          setDoc(doc(db, "users", finalUid), {
             name: profile.name,
             email: profile.email,
             phone: profile.phone,
@@ -140,21 +148,10 @@ export default function LeadCapture({ onCapture, alertMessage }: LeadCaptureProp
             streak: 1,
             lastStudyDate: new Date().toISOString()
           }),
-          new Promise((resolve) => setTimeout(resolve, 3000))
+          new Promise((resolve) => setTimeout(resolve, 2000))
         ]);
       } catch (fsErr) {
-        console.warn("[Firestore sync warning during register]", fsErr);
-      }
-
-      // Sync with Admin Logins system
-      const syncResult = await syncLoginWithServer(profile, "auth");
-      if (syncResult && syncResult.isBanned) {
-        setError("Esta conta está banida pelo administrador. Acesso negado.");
-        return;
-      }
-      if (syncResult && syncResult.isExpired) {
-        setError("O período limite de uso de 365 dias (1 ano) expirou para esta conta.");
-        return;
+        console.warn("[Firestore sync warning]", fsErr);
       }
 
       onCapture(profile);
@@ -177,126 +174,60 @@ export default function LeadCapture({ onCapture, alertMessage }: LeadCaptureProp
     setIsLoading(true);
     setError("");
     try {
-      let uid = "";
-      let authUserEmail = email;
+      // 1. Autenticar diretamente no banco de dados do servidor
+      const loginResponse = await fetch("/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          email: email.trim(),
+          password: password.trim()
+        })
+      });
 
-      try {
-        const userCredential = await signInWithEmailAndPassword(auth, email, password);
-        uid = userCredential.user.uid;
-        authUserEmail = userCredential.user.email || email;
-      } catch (authErr: any) {
-        console.warn("[Firebase Login Auth Warning]", authErr);
-        if (
-          authErr.code === "auth/invalid-credential" || 
-          authErr.code === "auth/user-not-found" || 
-          authErr.code === "auth/wrong-password"
-        ) {
-          // Check local storage for previously registered profile
-          const saved = localStorage.getItem("enemflix_user_profile");
-          if (saved) {
-            try {
-              const parsed = JSON.parse(saved);
-              if (parsed.email === email) {
-                onCapture(parsed);
-                setIsLoading(false);
-                return;
-              }
-            } catch (e) {}
-          }
-          setIsLoading(false);
-          setError("E-mail ou senha incorretos. Verifique seus dados ou crie uma conta.");
-          return;
-        } else if (authErr.code === "auth/invalid-email") {
-          setIsLoading(false);
-          setError("O e-mail fornecido não é válido.");
-          return;
-        }
+      const loginData = await loginResponse.json();
 
-        // Fallback for auth/operation-not-allowed or console settings
-        const saved = localStorage.getItem("enemflix_user_profile");
-        if (saved) {
-          try {
-            const parsed = JSON.parse(saved);
-            if (parsed.email === email) {
-              onCapture(parsed);
-              setIsLoading(false);
-              return;
-            }
-          } catch (e) {}
-        }
-
-        uid = "usr_" + Date.now();
+      if (!loginResponse.ok || !loginData.success) {
+        setIsLoading(false);
+        setError(loginData.error || "E-mail ou senha incorretos.");
+        return;
       }
 
-      let profile: LeadProfile;
+      const serverUser = loginData.user;
+      let finalUid = serverUser.uid;
 
+      // 2. Sincronizar em paralelo com Firebase Auth (se disponível)
       try {
-        const userDocRef = doc(db, "users", uid);
-        const userDocSnap = await Promise.race([
-          getDoc(userDocRef),
-          new Promise<null>((resolve) => setTimeout(() => resolve(null), 3000))
-        ]);
-
-        if (userDocSnap && userDocSnap.exists()) {
-          const data = userDocSnap.data();
-          profile = {
-            name: data.name || "Estudante Focado",
-            email: data.email || authUserEmail,
-            phone: data.phone || "",
-            targetCourse: data.targetCourse || "Medicina",
-            targetScore: data.targetScore || 750,
-            isLeadCaptured: true,
-            uid,
-            createdAt: data.createdAt || new Date().toISOString()
-          };
-        } else {
-          profile = {
-            name: email.split("@")[0] || "Estudante Focado",
-            email: authUserEmail,
-            phone: "",
-            targetCourse: "Medicina",
-            targetScore: 750,
-            isLeadCaptured: true,
-            uid,
-            createdAt: new Date().toISOString()
-          };
-          setDoc(userDocRef, {
-            name: profile.name,
-            email: profile.email,
-            phone: profile.phone,
-            targetCourse: profile.targetCourse,
-            targetScore: profile.targetScore,
-            createdAt: profile.createdAt,
-            streak: 1,
-            lastStudyDate: new Date().toISOString()
-          }).catch(e => console.warn("Background setDoc error:", e));
-        }
-      } catch (fsErr) {
-        console.warn("[Firestore user doc fetch warning]", fsErr);
-        profile = {
-          name: email.split("@")[0] || "Estudante Focado",
-          email: authUserEmail,
-          phone: "",
-          targetCourse: "Medicina",
-          targetScore: 750,
-          isLeadCaptured: true,
-          uid,
-          createdAt: new Date().toISOString()
-        };
+        const userCredential = await signInWithEmailAndPassword(auth, email.trim(), password);
+        finalUid = userCredential.user.uid;
+      } catch (fbErr) {
+        console.warn("[Firebase Login notice - autenticado pelo banco de dados]", fbErr);
       }
+
+      const profile: LeadProfile = {
+        name: serverUser.name || email.split("@")[0],
+        email: serverUser.email || email.trim(),
+        phone: serverUser.phone || "",
+        targetCourse: serverUser.targetCourse || "Medicina",
+        targetScore: serverUser.targetScore || 750,
+        isLeadCaptured: true,
+        uid: finalUid,
+        createdAt: serverUser.createdAt || new Date().toISOString()
+      };
 
       localStorage.setItem("enemflix_user_profile", JSON.stringify(profile));
 
-      // Sync with Admin Logins system
-      const syncResult = await syncLoginWithServer(profile, "auth");
-      if (syncResult && syncResult.isBanned) {
-        setError("Esta conta foi banida pelo administrador do sistema.");
-        return;
-      }
-      if (syncResult && syncResult.isExpired) {
-        setError("O período limite de uso de 365 dias (1 ano) expirou para esta conta.");
-        return;
-      }
+      // Atualizar preferências do Firestore em segundo plano se existirem
+      try {
+        const userDocRef = doc(db, "users", finalUid);
+        getDoc(userDocRef).then((snap) => {
+          if (snap.exists()) {
+            const data = snap.data();
+            if (data.targetCourse) profile.targetCourse = data.targetCourse;
+            if (data.targetScore) profile.targetScore = data.targetScore;
+            localStorage.setItem("enemflix_user_profile", JSON.stringify(profile));
+          }
+        }).catch(() => {});
+      } catch (e) {}
 
       onCapture(profile);
     } catch (err: any) {
@@ -707,10 +638,25 @@ export default function LeadCapture({ onCapture, alertMessage }: LeadCaptureProp
         )}
 
         {/* Confidential footer */}
-
         <p className="text-center text-[9px] text-zinc-500 mt-5 leading-relaxed">
           Sua privacidade é nossa prioridade. Ao continuar, você aceita o armazenamento seguro dos seus dados de estudo.
         </p>
+
+        {/* Discrete Admin Link */}
+        {onOpenAdmin && (
+          <div className="mt-4 pt-3 border-t border-white/5 flex items-center justify-between text-[11px] text-zinc-600">
+            <span>EnemFlix v2.5</span>
+            <button
+              type="button"
+              onClick={onOpenAdmin}
+              className="text-zinc-500 hover:text-zinc-300 transition flex items-center gap-1.5 cursor-pointer py-1 px-2 rounded hover:bg-white/5"
+              title="Acessar Painel Administrativo (Atalho: F3)"
+            >
+              <Shield className="w-3 h-3 text-[#e50914]" />
+              <span>Painel Admin (F3)</span>
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );
