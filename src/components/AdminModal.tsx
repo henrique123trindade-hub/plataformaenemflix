@@ -217,38 +217,49 @@ export default function AdminModal({ isOpen, onClose }: AdminModalProps) {
     return [];
   };
 
-  // Load users from Firestore Cloud Database and Server API
-  const fetchUsers = async () => {
-    setIsLoading(true);
+  // Load users immediately from Server Database API and Firestore Cloud Database
+  const fetchUsers = async (silent = false) => {
+    if (!silent) {
+      setIsLoading(true);
+    }
     try {
-      // 1. Fetch directly from Firestore Cloud Database
-      const firestoreList: AdminUser[] = [];
-      try {
-        const snap = await getDocs(collection(db, "users"));
-        snap.forEach(d => {
-          const u = d.data();
-          if (!isDemoAdminUser(u)) {
-            firestoreList.push(docToAdminUser(u, d.id));
-          }
-        });
-      } catch (fsErr) {
-        console.warn("Firestore direct query notice:", fsErr);
-      }
-
-      // 2. Fetch from Server Database API
+      // 1. Fetch IMMEDIATELY from Server Database API (Fastest and 100% persistent)
       let serverList: AdminUser[] = [];
       try {
         const res = await fetch("/api/admin/users", {
           headers: {
             "x-admin-password": "pirulitobaby"
-          }
+          },
+          cache: "no-store"
         });
         const data = await res.json();
         if (data.success && Array.isArray(data.users)) {
           serverList = data.users.filter((u: AdminUser) => !isDemoAdminUser(u));
+          // Update immediately so there is ZERO delay or infinite hang
+          setUsers(serverList);
+          setIsLoading(false);
         }
       } catch (srvErr) {
         console.warn("Server API fetch notice:", srvErr);
+      }
+
+      // 2. Fetch from Firestore Cloud Database with strict timeout (never hangs)
+      const firestoreList: AdminUser[] = [];
+      try {
+        const firestorePromise = getDocs(collection(db, "users"));
+        const timeoutPromise = new Promise<null>((resolve) => setTimeout(() => resolve(null), 1200));
+        const snap = await Promise.race([firestorePromise, timeoutPromise]);
+        
+        if (snap && "forEach" in snap) {
+          (snap as any).forEach((d: any) => {
+            const u = d.data();
+            if (!isDemoAdminUser(u)) {
+              firestoreList.push(docToAdminUser(u, d.id));
+            }
+          });
+        }
+      } catch (fsErr) {
+        console.warn("Firestore direct query notice:", fsErr);
       }
 
       // 3. Merge both sources by UID and Email without duplicates
@@ -273,10 +284,14 @@ export default function AdminModal({ isOpen, onClose }: AdminModalProps) {
         new Date(b.lastLoginAt || b.createdAt).getTime() - new Date(a.lastLoginAt || a.createdAt).getTime()
       );
 
-      setUsers(merged);
-      try {
-        localStorage.setItem("enemflix_admin_users_cache", JSON.stringify(merged));
-      } catch (e) {}
+      if (merged.length > 0) {
+        setUsers(merged);
+        try {
+          localStorage.setItem("enemflix_admin_users_cache", JSON.stringify(merged));
+        } catch (e) {}
+      } else if (serverList.length > 0) {
+        setUsers(serverList);
+      }
     } catch (err) {
       console.error("Erro geral ao carregar usuários:", err);
       const cached = getCachedAdminUsers();
@@ -286,14 +301,19 @@ export default function AdminModal({ isOpen, onClose }: AdminModalProps) {
     }
   };
 
-  // Real-time Firestore live listener when modal is open and authenticated
+  // Live listener & auto-refresh interval when modal is open and authenticated
   useEffect(() => {
     if (!isOpen || !isAuthenticated) return;
 
-    // Initial fetch
-    fetchUsers();
+    // 1. Initial immediate fetch
+    fetchUsers(false);
 
-    // Subscribe to real-time updates from Firestore cloud collection
+    // 2. Automatic live polling every 3 seconds so ANY new account created in the country pops up live!
+    const autoRefreshTimer = setInterval(() => {
+      fetchUsers(true);
+    }, 3000);
+
+    // 3. Optional real-time Firestore listener with safety guard
     let unsubscribe = () => {};
     try {
       const usersCol = collection(db, "users");
@@ -335,6 +355,7 @@ export default function AdminModal({ isOpen, onClose }: AdminModalProps) {
     }
 
     return () => {
+      clearInterval(autoRefreshTimer);
       unsubscribe();
     };
   }, [isOpen, isAuthenticated]);
@@ -805,14 +826,15 @@ export default function AdminModal({ isOpen, onClose }: AdminModalProps) {
                 <Shield className="w-5 h-5" />
               </div>
               <div>
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 flex-wrap">
                   <h2 className="text-base font-black text-white tracking-tight">Painel Administrativo EnemFlix</h2>
-                  <span className="text-[10px] bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 px-2 py-0.5 rounded-full font-bold uppercase tracking-wider">
-                    Sessão Master
+                  <span className="text-[10px] bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 px-2 py-0.5 rounded-full font-bold uppercase tracking-wider flex items-center gap-1.5">
+                    <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                    Banco Ao Vivo (Nacional)
                   </span>
                 </div>
                 <p className="text-xs text-zinc-400">
-                  Gerenciamento de acessos, histórico de logins e limite de 365 dias
+                  Sincronização em tempo real de todas as contas cadastradas no Brasil
                 </p>
               </div>
             </div>
@@ -830,9 +852,9 @@ export default function AdminModal({ isOpen, onClose }: AdminModalProps) {
               </button>
 
               <button
-                onClick={fetchUsers}
+                onClick={() => fetchUsers(false)}
                 disabled={isLoading}
-                title="Atualizar lista"
+                title="Atualizar banco de dados agora"
                 className="p-2 bg-white/5 hover:bg-white/10 text-zinc-300 hover:text-white rounded-lg border border-white/5 transition flex items-center gap-1.5 text-xs font-semibold cursor-pointer disabled:opacity-50"
               >
                 <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? "animate-spin text-[#e50914]" : ""}`} />
