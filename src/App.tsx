@@ -77,10 +77,14 @@ export default function App() {
   const [isAdminOpen, setIsAdminOpen] = useState<boolean>(false);
   const [sessionAlertMessage, setSessionAlertMessage] = useState<string>("");
 
-  // Global F3 shortcut listener
+  // Global F3 shortcut listener (also supports Ctrl+Shift+A / Cmd+Shift+A)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "F3" || e.code === "F3") {
+      if (
+        e.key === "F3" || 
+        e.code === "F3" || 
+        ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === "A" || e.key === "a"))
+      ) {
         e.preventDefault();
         setIsAdminOpen(prev => !prev);
       }
@@ -625,8 +629,7 @@ export default function App() {
       <>
         <LeadCapture 
           onCapture={handleCaptureLead} 
-          alertMessage={sessionAlertMessage} 
-          onOpenAdmin={() => setIsAdminOpen(true)}
+          alertMessage={sessionAlertMessage}
         />
         <AdminModal isOpen={isAdminOpen} onClose={() => setIsAdminOpen(false)} />
       </>

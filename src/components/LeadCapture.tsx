@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { LeadProfile } from "../types";
-import { Sparkles, Mail, Lock, User as UserIcon, Phone as PhoneIcon, ArrowLeft, Eye, EyeOff, Shield } from "lucide-react";
+import { Sparkles, Mail, Lock, User as UserIcon, Phone as PhoneIcon, ArrowLeft, Eye, EyeOff } from "lucide-react";
 import { 
   auth, 
   db, 
@@ -15,10 +15,9 @@ import {
 interface LeadCaptureProps {
   onCapture: (profile: LeadProfile) => void;
   alertMessage?: string;
-  onOpenAdmin?: () => void;
 }
 
-export default function LeadCapture({ onCapture, alertMessage, onOpenAdmin }: LeadCaptureProps) {
+export default function LeadCapture({ onCapture, alertMessage }: LeadCaptureProps) {
   const [mode, setMode] = useState<"signin" | "signup" | "forgot">("signin");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -89,47 +88,72 @@ export default function LeadCapture({ onCapture, alertMessage, onOpenAdmin }: Le
     setIsLoading(true);
     setError("");
     try {
-      // 1. Cadastrar diretamente no banco de dados do servidor
-      const regResponse = await fetch("/api/auth/register", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          name: name.trim(),
-          email: email.trim(),
-          password: password.trim(),
-          phone: phone.trim(),
-          targetCourse,
-          targetScore
-        })
-      });
+      let serverUser: any = null;
+      let regErrorMsg = "";
 
-      const regData = await regResponse.json();
-      if (!regResponse.ok || !regData.success) {
+      // 1. Tentar cadastro direto no banco de dados do servidor
+      try {
+        const regResponse = await fetch("/api/auth/register", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name: name.trim(),
+            email: email.trim(),
+            password: password.trim(),
+            phone: phone.trim(),
+            targetCourse,
+            targetScore
+          })
+        });
+
+        const contentType = regResponse.headers.get("content-type");
+        if (contentType && contentType.includes("application/json")) {
+          const regData = await regResponse.json();
+          if (regResponse.ok && regData.success) {
+            serverUser = regData.user;
+          } else {
+            regErrorMsg = regData.error || "Não foi possível criar a conta. Tente novamente.";
+          }
+        } else {
+          console.warn("Servidor retornou resposta não-JSON no registro.");
+        }
+      } catch (srvErr) {
+        console.warn("Aviso de rede ao tentar registrar no servidor:", srvErr);
+      }
+
+      // Se o servidor retornou erro explícito (ex: e-mail já cadastrado)
+      if (regErrorMsg) {
         setIsLoading(false);
-        setError(regData.error || "Não foi possível criar a conta. Tente novamente.");
+        setError(regErrorMsg);
         return;
       }
 
-      const serverUser = regData.user;
-      let finalUid = serverUser.uid;
+      let finalUid = serverUser?.uid || ("usr_" + Date.now() + "_" + Math.random().toString(36).substring(2, 6));
 
-      // 2. Sincronizar em paralelo com Firebase Auth (se ativo)
+      // 2. Sincronizar em paralelo com Firebase Auth
       try {
-        const userCredential = await createUserWithEmailAndPassword(auth, email.trim(), password);
-        finalUid = userCredential.user.uid;
+        const userCredential = await createUserWithEmailAndPassword(auth, email.trim(), password.trim());
+        if (userCredential?.user?.uid) {
+          finalUid = userCredential.user.uid;
+        }
       } catch (fbErr: any) {
-        console.warn("[Firebase Register notice - conta salva com sucesso no banco]", fbErr);
+        console.warn("[Firebase Register notice]", fbErr);
+        if (fbErr.code === "auth/email-already-in-use" && !serverUser) {
+          setIsLoading(false);
+          setError("Este e-mail já está em uso. Por favor, conecte-se com sua senha ou use outro e-mail.");
+          return;
+        }
       }
 
       const profile: LeadProfile = {
-        name: serverUser.name || name.trim(),
-        email: serverUser.email || email.trim(),
-        phone: serverUser.phone || phone.trim(),
-        targetCourse: serverUser.targetCourse || targetCourse,
-        targetScore: serverUser.targetScore || targetScore,
+        name: serverUser?.name || name.trim(),
+        email: serverUser?.email || email.trim().toLowerCase(),
+        phone: serverUser?.phone || phone.trim(),
+        targetCourse: serverUser?.targetCourse || targetCourse,
+        targetScore: serverUser?.targetScore || targetScore,
         isLeadCaptured: true,
         uid: finalUid,
-        createdAt: serverUser.createdAt || new Date().toISOString()
+        createdAt: serverUser?.createdAt || new Date().toISOString()
       };
 
       // 3. Salvar perfil localmente
@@ -154,6 +178,11 @@ export default function LeadCapture({ onCapture, alertMessage, onOpenAdmin }: Le
         console.warn("[Firestore sync warning]", fsErr);
       }
 
+      // Sincronizar registro com servidor caso a primeira tentativa direta tenha sofrido timeout
+      if (!serverUser) {
+        syncLoginWithServer(profile, "auth").catch(() => {});
+      }
+
       onCapture(profile);
     } catch (err: any) {
       console.error("[Register Error]", err);
@@ -174,62 +203,171 @@ export default function LeadCapture({ onCapture, alertMessage, onOpenAdmin }: Le
     setIsLoading(true);
     setError("");
     try {
-      // 1. Autenticar diretamente no banco de dados do servidor
-      const loginResponse = await fetch("/api/auth/login", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          email: email.trim(),
-          password: password.trim()
-        })
-      });
+      let serverUser: any = null;
+      let serverErrorMessage = "";
+      let hasServerValidation = false;
 
-      const loginData = await loginResponse.json();
+      // 1. Autenticar no banco de dados do servidor
+      try {
+        const loginResponse = await fetch("/api/auth/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            email: email.trim(),
+            password: password.trim()
+          })
+        });
 
-      if (!loginResponse.ok || !loginData.success) {
+        const contentType = loginResponse.headers.get("content-type");
+        if (contentType && contentType.includes("application/json")) {
+          const loginData = await loginResponse.json();
+          if (loginResponse.ok && loginData.success) {
+            serverUser = loginData.user;
+          } else {
+            serverErrorMessage = loginData.error || "E-mail ou senha incorretos.";
+            hasServerValidation = true;
+          }
+        } else {
+          console.warn("Resposta do servidor não foi JSON (status:", loginResponse.status, ")");
+        }
+      } catch (srvErr) {
+        console.warn("Aviso ao tentar comunicar com a API do servidor:", srvErr);
+      }
+
+      // Se o servidor rejeitou com credencial errada, banimento ou expiração
+      if (hasServerValidation && serverErrorMessage) {
         setIsLoading(false);
-        setError(loginData.error || "E-mail ou senha incorretos.");
+        setError(serverErrorMessage);
         return;
       }
 
-      const serverUser = loginData.user;
-      let finalUid = serverUser.uid;
+      let finalUid = serverUser?.uid;
 
-      // 2. Sincronizar em paralelo com Firebase Auth (se disponível)
-      try {
-        const userCredential = await signInWithEmailAndPassword(auth, email.trim(), password);
-        finalUid = userCredential.user.uid;
-      } catch (fbErr) {
-        console.warn("[Firebase Login notice - autenticado pelo banco de dados]", fbErr);
+      // Se autenticou no servidor com sucesso:
+      if (serverUser) {
+        try {
+          const userCredential = await signInWithEmailAndPassword(auth, email.trim(), password.trim());
+          if (userCredential?.user?.uid) {
+            finalUid = userCredential.user.uid;
+          }
+        } catch (fbErr) {
+          console.warn("[Firebase Login notice - autenticado pelo banco de dados]", fbErr);
+        }
+
+        const profile: LeadProfile = {
+          name: serverUser.name || email.split("@")[0],
+          email: serverUser.email || email.trim().toLowerCase(),
+          phone: serverUser.phone || "",
+          targetCourse: serverUser.targetCourse || "Medicina",
+          targetScore: serverUser.targetScore || 750,
+          isLeadCaptured: true,
+          uid: finalUid || serverUser.uid,
+          createdAt: serverUser.createdAt || new Date().toISOString()
+        };
+
+        localStorage.setItem("enemflix_user_profile", JSON.stringify(profile));
+
+        // Atualizar preferências do Firestore em segundo plano se existirem
+        try {
+          const userDocRef = doc(db, "users", profile.uid);
+          getDoc(userDocRef).then((snap) => {
+            if (snap.exists()) {
+              const data = snap.data();
+              if (data.targetCourse) profile.targetCourse = data.targetCourse;
+              if (data.targetScore) profile.targetScore = data.targetScore;
+              localStorage.setItem("enemflix_user_profile", JSON.stringify(profile));
+            }
+          }).catch(() => {});
+        } catch (e) {}
+
+        onCapture(profile);
+        return;
       }
 
-      const profile: LeadProfile = {
-        name: serverUser.name || email.split("@")[0],
-        email: serverUser.email || email.trim(),
-        phone: serverUser.phone || "",
-        targetCourse: serverUser.targetCourse || "Medicina",
-        targetScore: serverUser.targetScore || 750,
-        isLeadCaptured: true,
-        uid: finalUid,
-        createdAt: serverUser.createdAt || new Date().toISOString()
-      };
-
-      localStorage.setItem("enemflix_user_profile", JSON.stringify(profile));
-
-      // Atualizar preferências do Firestore em segundo plano se existirem
+      // 2. Fallback de autenticação direta com Firebase Auth (caso servidor estivesse reiniciando)
       try {
-        const userDocRef = doc(db, "users", finalUid);
-        getDoc(userDocRef).then((snap) => {
-          if (snap.exists()) {
-            const data = snap.data();
-            if (data.targetCourse) profile.targetCourse = data.targetCourse;
-            if (data.targetScore) profile.targetScore = data.targetScore;
-            localStorage.setItem("enemflix_user_profile", JSON.stringify(profile));
-          }
-        }).catch(() => {});
-      } catch (e) {}
+        const userCredential = await signInWithEmailAndPassword(auth, email.trim(), password.trim());
+        finalUid = userCredential.user.uid;
 
-      onCapture(profile);
+        let profile: LeadProfile;
+        try {
+          const userDocRef = doc(db, "users", finalUid);
+          const userDocSnap = await Promise.race([
+            getDoc(userDocRef),
+            new Promise<null>((resolve) => setTimeout(() => resolve(null), 3000))
+          ]);
+
+          if (userDocSnap && userDocSnap.exists()) {
+            const data = userDocSnap.data();
+            profile = {
+              name: data.name || email.split("@")[0],
+              email: data.email || email.trim().toLowerCase(),
+              phone: data.phone || "",
+              targetCourse: data.targetCourse || "Medicina",
+              targetScore: data.targetScore || 750,
+              isLeadCaptured: true,
+              uid: finalUid,
+              createdAt: data.createdAt || new Date().toISOString()
+            };
+          } else {
+            profile = {
+              name: email.split("@")[0],
+              email: email.trim().toLowerCase(),
+              phone: "",
+              targetCourse: "Medicina",
+              targetScore: 750,
+              isLeadCaptured: true,
+              uid: finalUid,
+              createdAt: new Date().toISOString()
+            };
+          }
+        } catch (fsErr) {
+          profile = {
+            name: email.split("@")[0],
+            email: email.trim().toLowerCase(),
+            phone: "",
+            targetCourse: "Medicina",
+            targetScore: 750,
+            isLeadCaptured: true,
+            uid: finalUid,
+            createdAt: new Date().toISOString()
+          };
+        }
+
+        localStorage.setItem("enemflix_user_profile", JSON.stringify(profile));
+        syncLoginWithServer(profile, "auth").catch(() => {});
+        onCapture(profile);
+        return;
+      } catch (fbAuthErr: any) {
+        if (
+          fbAuthErr.code === "auth/invalid-credential" || 
+          fbAuthErr.code === "auth/user-not-found" || 
+          fbAuthErr.code === "auth/wrong-password"
+        ) {
+          setIsLoading(false);
+          setError("E-mail ou senha incorretos. Verifique seus dados ou crie uma conta.");
+          return;
+        } else if (fbAuthErr.code === "auth/invalid-email") {
+          setIsLoading(false);
+          setError("O e-mail inserido é inválido.");
+          return;
+        }
+      }
+
+      // 3. Fallback do perfil salvo no dispositivo
+      const saved = localStorage.getItem("enemflix_user_profile");
+      if (saved) {
+        try {
+          const parsed = JSON.parse(saved);
+          if (parsed && parsed.email?.toLowerCase() === email.trim().toLowerCase()) {
+            onCapture(parsed);
+            return;
+          }
+        } catch (e) {}
+      }
+
+      setIsLoading(false);
+      setError("Nenhuma conta encontrada com este e-mail ou dados incorretos. Caso seja seu primeiro acesso, crie sua conta.");
     } catch (err: any) {
       console.error("[Login Error]", err);
       setError("Erro ao realizar login: " + (err.message || "Verifique seus dados."));
@@ -641,22 +779,6 @@ export default function LeadCapture({ onCapture, alertMessage, onOpenAdmin }: Le
         <p className="text-center text-[9px] text-zinc-500 mt-5 leading-relaxed">
           Sua privacidade é nossa prioridade. Ao continuar, você aceita o armazenamento seguro dos seus dados de estudo.
         </p>
-
-        {/* Discrete Admin Link */}
-        {onOpenAdmin && (
-          <div className="mt-4 pt-3 border-t border-white/5 flex items-center justify-between text-[11px] text-zinc-600">
-            <span>EnemFlix v2.5</span>
-            <button
-              type="button"
-              onClick={onOpenAdmin}
-              className="text-zinc-500 hover:text-zinc-300 transition flex items-center gap-1.5 cursor-pointer py-1 px-2 rounded hover:bg-white/5"
-              title="Acessar Painel Administrativo (Atalho: F3)"
-            >
-              <Shield className="w-3 h-3 text-[#e50914]" />
-              <span>Painel Admin (F3)</span>
-            </button>
-          </div>
-        )}
       </div>
     </div>
   );
