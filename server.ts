@@ -571,17 +571,26 @@ async function startServer() {
 
   // 3. Autenticação do Administrador
   app.post("/api/admin/auth", (req, res) => {
-    const { password } = req.body;
-    if (password === ADMIN_PASSWORD) {
-      return res.json({ success: true });
+    try {
+      const { password } = req.body || {};
+      const cleanPassword = typeof password === "string" ? password.trim() : "";
+      if (cleanPassword.toLowerCase() === ADMIN_PASSWORD.toLowerCase()) {
+        return res.json({ success: true });
+      }
+      return res.status(401).json({ success: false, error: "Senha administrativa incorreta" });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err.message });
     }
-    return res.status(401).json({ success: false, error: "Senha administrativa incorreta" });
   });
 
   // Middleware de autorização para o painel admin
   const checkAdminAuth = (req: express.Request, res: express.Response, next: express.NextFunction) => {
-    const password = req.headers["x-admin-password"] || req.query.password || req.body.password;
-    if (password === ADMIN_PASSWORD) {
+    const headerPass = req.headers["x-admin-password"];
+    const queryPass = req.query.password;
+    const bodyPass = req.body ? req.body.password : undefined;
+    const password = (headerPass || queryPass || bodyPass || "") as string;
+
+    if (typeof password === "string" && password.trim().toLowerCase() === ADMIN_PASSWORD.toLowerCase()) {
       return next();
     }
     return res.status(401).json({ success: false, error: "Acesso não autorizado. Senha de administrador incorreta." });
