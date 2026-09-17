@@ -255,14 +255,32 @@ export async function getAllUsersFromFirestore(forceRefresh = false): Promise<Fi
 export async function getUserByEmailFromFirestore(email: string): Promise<FirestoreUser | null> {
   const cleanEmail = email.trim().toLowerCase();
   // Check memory cache first
-  const cached = cachedUsers.find(u => u.email.toLowerCase() === cleanEmail);
-  if (cached && Date.now() - lastCacheSync < CACHE_TTL_MS) {
-    return cached;
+  const cachedMatches = cachedUsers.filter(u => u.email && u.email.toLowerCase() === cleanEmail);
+  if (cachedMatches.length > 0 && Date.now() - lastCacheSync < CACHE_TTL_MS) {
+    cachedMatches.sort((a, b) => {
+      if (a.password && !b.password) return -1;
+      if (!a.password && b.password) return 1;
+      const tA = new Date(a.lastLogin || a.createdAt || 0).getTime();
+      const tB = new Date(b.lastLogin || b.createdAt || 0).getTime();
+      return tB - tA;
+    });
+    return cachedMatches[0];
   }
 
   // Refresh from Firestore
   const all = await getAllUsersFromFirestore(true);
-  return all.find(u => u.email.toLowerCase() === cleanEmail) || null;
+  const matches = all.filter(u => u.email && u.email.toLowerCase() === cleanEmail);
+  if (matches.length === 0) return null;
+
+  matches.sort((a, b) => {
+    if (a.password && !b.password) return -1;
+    if (!a.password && b.password) return 1;
+    const tA = new Date(a.lastLogin || a.createdAt || 0).getTime();
+    const tB = new Date(b.lastLogin || b.createdAt || 0).getTime();
+    return tB - tA;
+  });
+
+  return matches[0];
 }
 
 export async function getUserByUidFromFirestore(uid: string): Promise<FirestoreUser | null> {

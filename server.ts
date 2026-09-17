@@ -48,6 +48,17 @@ async function startServer() {
   const app = express();
   const PORT = 3000;
 
+  // CORS middleware for AI Studio iframe and reverse proxy
+  app.use((req, res, next) => {
+    res.header("Access-Control-Allow-Origin", "*");
+    res.header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
+    res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept, Authorization");
+    if (req.method === "OPTIONS") {
+      return res.sendStatus(200);
+    }
+    next();
+  });
+
   // JSON and URL-encoded parsing middleware with larger limits for essay image analysis
   app.use(express.json({ limit: "50mb" }));
   app.use(express.urlencoded({ limit: "50mb", extended: true }));
@@ -365,12 +376,14 @@ async function startServer() {
 
       const existingUser = await getUserByEmailFromFirestore(normalizedEmail);
       if (existingUser) {
-        // Se a senha bater, faz o login direto de forma transparente
-        if (existingUser.password && verifyPassword(String(password).trim(), existingUser.password)) {
+        const rawPassword = String(password).trim();
+        // Se já tem senha e a senha confere, faz o login direto com sucesso
+        if (existingUser.password && verifyPassword(rawPassword, existingUser.password)) {
           const now = new Date().toISOString();
           await updateUserInFirestore(existingUser.uid, {
             lastLogin: now,
             lastLoginAt: now,
+            lastActiveAt: now,
             loginCount: (existingUser.loginCount || 1) + 1
           });
           const { password: _, ...safeUser } = existingUser;
@@ -379,6 +392,27 @@ async function startServer() {
             user: { ...safeUser, lastLogin: now, loginCount: (existingUser.loginCount || 1) + 1 }
           });
         }
+
+        // Se a conta existia sem senha salva (ex: do lead capture), define a senha agora e conclui com sucesso
+        if (!existingUser.password) {
+          const now = new Date().toISOString();
+          const newPasswordHash = hashPassword(rawPassword);
+          await updateUserInFirestore(existingUser.uid, {
+            password: newPasswordHash,
+            lastLogin: now,
+            lastLoginAt: now,
+            lastActiveAt: now,
+            name: name ? name.trim() : existingUser.name,
+            phone: phone ? phone.trim() : existingUser.phone,
+            loginCount: (existingUser.loginCount || 1) + 1
+          });
+          const { password: _, ...safeUser } = existingUser;
+          return res.json({
+            success: true,
+            user: { ...safeUser, lastLogin: now, loginCount: (existingUser.loginCount || 1) + 1 }
+          });
+        }
+
         return res.status(400).json({ 
           success: false, 
           error: "Este e-mail já está cadastrado. Faça login com sua senha." 
@@ -453,6 +487,14 @@ async function startServer() {
       const rawPassword = String(password).trim();
       if (user.password && !verifyPassword(rawPassword, user.password)) {
         return res.status(401).json({ success: false, error: "Senha incorreta. Verifique seus dados." });
+      }
+
+      // Se a conta não possuía senha ainda no Firestore, salva a senha informada para persistência
+      let currentPasswordHash = user.password;
+      if (!currentPasswordHash) {
+        currentPasswordHash = hashPassword(rawPassword);
+        await updateUserInFirestore(user.uid, { password: currentPasswordHash });
+        user.password = currentPasswordHash;
       }
 
       const now = new Date().toISOString();

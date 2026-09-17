@@ -149,7 +149,35 @@ export default function App() {
           }
         }
       })
-      .catch(() => {});
+      .catch(() => {
+        // Fallback direto no Firestore
+        try {
+          const userDocRef = doc(db, "users", userProfile.uid);
+          getDoc(userDocRef).then((snap) => {
+            if (snap.exists()) {
+              const d = snap.data();
+              if (d.level !== undefined || d.xp !== undefined) {
+                setUserStats(prev => {
+                  const merged: UserStats = {
+                    level: Math.max(prev.level, d.level || 1),
+                    xp: Math.max(prev.xp, d.xp || 0),
+                    xpToNextLevel: d.xpToNextLevel || prev.xpToNextLevel,
+                    streak: Math.max(prev.streak, d.streak || 1),
+                    hoursStudied: Math.max(prev.hoursStudied, d.hoursStudied || 0),
+                    completedVideos: Array.from(new Set([...prev.completedVideos, ...(d.completedVideos || [])])),
+                    bookmarkedVideos: Array.from(new Set([...prev.bookmarkedVideos, ...(d.bookmarkedVideos || [])])),
+                    solvedQuestionsCount: Math.max(prev.solvedQuestionsCount, d.solvedQuestionsCount || 0),
+                    correctAnswersCount: Math.max(prev.correctAnswersCount, d.correctAnswersCount || 0),
+                    lastStudyDate: d.lastStudyDate || prev.lastStudyDate
+                  };
+                  localStorage.setItem("enemflix_user_stats", JSON.stringify(merged));
+                  return merged;
+                });
+              }
+            }
+          }).catch(() => {});
+        } catch (e) {}
+      });
   }, [userProfile?.uid]);
 
   // 5. Firebase Auth Sync Listener

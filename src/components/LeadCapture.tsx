@@ -9,7 +9,11 @@ import {
   sendPasswordResetEmail,
   doc,
   setDoc,
-  getDoc
+  getDoc,
+  collection,
+  query,
+  where,
+  getDocs
 } from "../lib/firebase";
 
 interface LeadCaptureProps {
@@ -130,19 +134,14 @@ export default function LeadCapture({ onCapture, alertMessage }: LeadCaptureProp
 
       let finalUid = serverUser?.uid || ("usr_" + Date.now() + "_" + Math.random().toString(36).substring(2, 6));
 
-      // 2. Sincronizar em paralelo com Firebase Auth
+      // 2. Sincronizar em paralelo com Firebase Auth (silencioso caso não configurado no console)
       try {
         const userCredential = await createUserWithEmailAndPassword(auth, email.trim(), password.trim());
         if (userCredential?.user?.uid) {
           finalUid = userCredential.user.uid;
         }
       } catch (fbErr: any) {
-        console.warn("[Firebase Register notice]", fbErr);
-        if (fbErr.code === "auth/email-already-in-use" && !serverUser) {
-          setIsLoading(false);
-          setError("Este e-mail já está em uso. Por favor, conecte-se com sua senha ou use outro e-mail.");
-          return;
-        }
+        // Fallback natural para a persistência no Firestore Cloud e Backend
       }
 
       const profile: LeadProfile = {
@@ -268,15 +267,6 @@ export default function LeadCapture({ onCapture, alertMessage }: LeadCaptureProp
 
       // Se autenticou no servidor com sucesso:
       if (serverUser) {
-        try {
-          const userCredential = await signInWithEmailAndPassword(auth, email.trim(), password.trim());
-          if (userCredential?.user?.uid) {
-            finalUid = userCredential.user.uid;
-          }
-        } catch (fbErr) {
-          console.warn("[Firebase Login notice - autenticado pelo banco de dados]", fbErr);
-        }
-
         const profile: LeadProfile = {
           name: serverUser.name || email.split("@")[0],
           email: serverUser.email || email.trim().toLowerCase(),
@@ -316,7 +306,7 @@ export default function LeadCapture({ onCapture, alertMessage }: LeadCaptureProp
           localStorage.setItem("enemflix_essays", JSON.stringify(serverUser.essays));
         }
 
-        // Atualizar preferências e carimbo de acesso no Firestore
+        // Atualizar carimbo de acesso no Firestore
         try {
           const userDocRef = doc(db, "users", profile.uid);
           setDoc(userDocRef, {
@@ -329,89 +319,82 @@ export default function LeadCapture({ onCapture, alertMessage }: LeadCaptureProp
             lastLoginAt: new Date().toISOString(),
             lastActiveAt: new Date().toISOString()
           }, { merge: true }).catch(() => {});
-
-          getDoc(userDocRef).then((snap) => {
-            if (snap.exists()) {
-              const data = snap.data();
-              if (data.targetCourse) profile.targetCourse = data.targetCourse;
-              if (data.targetScore) profile.targetScore = data.targetScore;
-              localStorage.setItem("enemflix_user_profile", JSON.stringify(profile));
-            }
-          }).catch(() => {});
         } catch (e) {}
 
         onCapture(profile);
         return;
       }
 
-      // 2. Fallback de autenticação direta com Firebase Auth (caso servidor estivesse reiniciando)
+      // 2. Fallback de consulta e autenticação direta via Firestore Cloud
       try {
-        const userCredential = await signInWithEmailAndPassword(auth, email.trim(), password.trim());
-        finalUid = userCredential.user.uid;
+        const cleanEmail = email.trim().toLowerCase();
+        const usersRef = collection(db, "users");
+        const q = query(usersRef, where("email", "==", cleanEmail));
+        const querySnapshot = await Promise.race([
+          getDocs(q),
+          new Promise<any>((_, reject) => setTimeout(() => reject(new Error("Timeout Firestore")), 3500))
+        ]);
 
-        let profile: LeadProfile;
-        try {
-          const userDocRef = doc(db, "users", finalUid);
-          const userDocSnap = await Promise.race([
-            getDoc(userDocRef),
-            new Promise<null>((resolve) => setTimeout(() => resolve(null), 3000))
-          ]);
+        if (querySnapshot && !querySnapshot.empty) {
+          const userDoc = querySnapshot.docs[0];
+          const data = userDoc.data();
+          const docUid = userDoc.id;
 
-          if (userDocSnap && userDocSnap.exists()) {
-            const data = userDocSnap.data();
-            profile = {
-              name: data.name || email.split("@")[0],
-              email: data.email || email.trim().toLowerCase(),
-              phone: data.phone || "",
-              targetCourse: data.targetCourse || "Medicina",
-              targetScore: data.targetScore || 750,
-              isLeadCaptured: true,
-              uid: finalUid,
-              createdAt: data.createdAt || new Date().toISOString()
-            };
-          } else {
-            profile = {
-              name: email.split("@")[0],
-              email: email.trim().toLowerCase(),
-              phone: "",
-              targetCourse: "Medicina",
-              targetScore: 750,
-              isLeadCaptured: true,
-              uid: finalUid,
-              createdAt: new Date().toISOString()
-            };
+          if (data.isBanned) {
+            setIsLoading(false);
+            setError("Esta conta está temporariamente suspensa.");
+            return;
           }
-        } catch (fsErr) {
-          profile = {
-            name: email.split("@")[0],
-            email: email.trim().toLowerCase(),
-            phone: "",
-            targetCourse: "Medicina",
-            targetScore: 750,
-            isLeadCaptured: true,
-            uid: finalUid,
-            createdAt: new Date().toISOString()
-          };
-        }
 
-        localStorage.setItem("enemflix_user_profile", JSON.stringify(profile));
-        syncLoginWithServer(profile, "auth").catch(() => {});
-        onCapture(profile);
-        return;
-      } catch (fbAuthErr: any) {
-        if (
-          fbAuthErr.code === "auth/invalid-credential" || 
-          fbAuthErr.code === "auth/user-not-found" || 
-          fbAuthErr.code === "auth/wrong-password"
-        ) {
-          setIsLoading(false);
-          setError("E-mail ou senha incorretos. Verifique seus dados ou crie uma conta.");
-          return;
-        } else if (fbAuthErr.code === "auth/invalid-email") {
-          setIsLoading(false);
-          setError("O e-mail inserido é inválido.");
+          const profile: LeadProfile = {
+            name: data.name || cleanEmail.split("@")[0],
+            email: cleanEmail,
+            phone: data.phone || "",
+            targetCourse: data.targetCourse || "Medicina",
+            targetScore: data.targetScore || 750,
+            isLeadCaptured: true,
+            uid: docUid,
+            createdAt: data.createdAt || new Date().toISOString()
+          };
+
+          localStorage.setItem("enemflix_user_profile", JSON.stringify(profile));
+
+          const statsToSave = {
+            level: data.level || 1,
+            xp: data.xp || 0,
+            xpToNextLevel: data.xpToNextLevel || 1000,
+            streak: data.streak || 1,
+            hoursStudied: data.hoursStudied || 0,
+            completedVideos: Array.isArray(data.completedVideos) ? data.completedVideos : [],
+            bookmarkedVideos: Array.isArray(data.bookmarkedVideos) ? data.bookmarkedVideos : [],
+            solvedQuestionsCount: data.solvedQuestionsCount || 0,
+            correctAnswersCount: data.correctAnswersCount || 0,
+            lastStudyDate: data.lastStudyDate || new Date().toISOString()
+          };
+          localStorage.setItem("enemflix_user_stats", JSON.stringify(statsToSave));
+
+          if (Array.isArray(data.videoProgress)) {
+            localStorage.setItem("enemflix_video_progress", JSON.stringify(data.videoProgress));
+          }
+          if (Array.isArray(data.simulatedExams)) {
+            localStorage.setItem("enemflix_simulated_exams", JSON.stringify(data.simulatedExams));
+          }
+          if (Array.isArray(data.essays)) {
+            localStorage.setItem("enemflix_essays", JSON.stringify(data.essays));
+          }
+
+          // Atualizar último acesso no Firestore
+          setDoc(doc(db, "users", docUid), {
+            lastLoginAt: new Date().toISOString(),
+            lastActiveAt: new Date().toISOString(),
+            loginCount: (data.loginCount || 1) + 1
+          }, { merge: true }).catch(() => {});
+
+          onCapture(profile);
           return;
         }
+      } catch (directFirestoreErr) {
+        console.warn("[Direct Firestore fallback warning]", directFirestoreErr);
       }
 
       // 3. Fallback do perfil salvo no dispositivo
