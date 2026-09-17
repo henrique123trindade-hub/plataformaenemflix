@@ -15,16 +15,31 @@ export interface FirestoreUser {
   lastLogin: string;
   lastLoginAt?: string;
   lastActiveAt?: string;
-  expiresAt: string;
-  limitDays: number;
+  expiresAt?: string;
+  limitDays?: number;
   loginCount: number;
-  status: "active" | "disconnected" | "banned" | "expired";
-  isBanned: boolean;
+  status?: "active" | "disconnected" | "banned" | "expired";
+  isBanned?: boolean;
   bannedAt?: string | null;
   banReason?: string | null;
-  isDisconnected: boolean;
+  isDisconnected?: boolean;
   disconnectedAt?: string | null;
   userAgent?: string;
+  // Progress & Study Stats:
+  level?: number;
+  xp?: number;
+  xpToNextLevel?: number;
+  streak?: number;
+  hoursStudied?: number;
+  completedVideos?: string[];
+  bookmarkedVideos?: string[];
+  solvedQuestionsCount?: number;
+  correctAnswersCount?: number;
+  lastStudyDate?: string;
+  videoProgress?: any[];
+  simulatedExams?: any[];
+  essays?: any[];
+  aiConversations?: any[];
 }
 
 export interface UserUsage {
@@ -138,7 +153,14 @@ function toFirestoreFields(obj: Record<string, any>): Record<string, any> {
     } else if (Array.isArray(val)) {
       fields[key] = {
         arrayValue: {
-          values: val.map(v => (typeof v === "string" ? { stringValue: v } : { stringValue: String(v) }))
+          values: val.map(v => {
+            if (v === null || v === undefined) return { nullValue: null };
+            if (typeof v === "boolean") return { booleanValue: v };
+            if (typeof v === "number") return Number.isInteger(v) ? { integerValue: String(v) } : { doubleValue: v };
+            if (typeof v === "string") return { stringValue: v };
+            if (typeof v === "object") return { mapValue: { fields: toFirestoreFields(v) } };
+            return { stringValue: String(v) };
+          })
         }
       };
     } else if (typeof val === "object") {
@@ -157,7 +179,15 @@ function fromFirestoreFields(fields: Record<string, any> = {}): Record<string, a
     else if ("doubleValue" in val) result[key] = val.doubleValue;
     else if ("nullValue" in val) result[key] = null;
     else if ("arrayValue" in val) {
-      result[key] = (val.arrayValue.values || []).map((v: any) => fromFirestoreFields({ v }).v);
+      result[key] = (val.arrayValue?.values || []).map((item: any) => {
+        if ("stringValue" in item) return item.stringValue;
+        if ("booleanValue" in item) return item.booleanValue;
+        if ("integerValue" in item) return parseInt(item.integerValue, 10);
+        if ("doubleValue" in item) return item.doubleValue;
+        if ("nullValue" in item) return null;
+        if ("mapValue" in item) return fromFirestoreFields(item.mapValue.fields);
+        return item;
+      });
     } else if ("mapValue" in val) {
       result[key] = fromFirestoreFields(val.mapValue.fields);
     }
@@ -323,3 +353,37 @@ export async function deleteUserFromFirestore(uid: string): Promise<boolean> {
     return false;
   }
 }
+
+export async function getUserProgressFromFirestore(uid: string) {
+  const user = await getUserByUidFromFirestore(uid);
+  if (!user) return null;
+  return {
+    level: user.level || 1,
+    xp: user.xp || 0,
+    xpToNextLevel: user.xpToNextLevel || 1000,
+    streak: user.streak || 1,
+    hoursStudied: user.hoursStudied || 0,
+    completedVideos: user.completedVideos || [],
+    bookmarkedVideos: user.bookmarkedVideos || [],
+    solvedQuestionsCount: user.solvedQuestionsCount || 0,
+    correctAnswersCount: user.correctAnswersCount || 0,
+    lastStudyDate: user.lastStudyDate || new Date().toISOString(),
+    videoProgress: user.videoProgress || [],
+    simulatedExams: user.simulatedExams || [],
+    essays: user.essays || [],
+    aiConversations: user.aiConversations || []
+  };
+}
+
+export async function saveUserProgressToFirestore(uid: string, progressData: any): Promise<boolean> {
+  try {
+    return await updateUserInFirestore(uid, {
+      ...progressData,
+      lastActiveAt: new Date().toISOString()
+    });
+  } catch (err) {
+    console.error("Erro ao salvar progresso no Firestore:", err);
+    return false;
+  }
+}
+

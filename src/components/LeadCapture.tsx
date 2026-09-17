@@ -156,8 +156,24 @@ export default function LeadCapture({ onCapture, alertMessage }: LeadCaptureProp
         createdAt: serverUser?.createdAt || new Date().toISOString()
       };
 
-      // 3. Salvar perfil localmente
+      // 3. Salvar perfil e estatísticas iniciais localmente
       localStorage.setItem("enemflix_user_profile", JSON.stringify(profile));
+      const initialStats = {
+        level: 1,
+        xp: 0,
+        xpToNextLevel: 1000,
+        streak: 1,
+        hoursStudied: 0,
+        completedVideos: [],
+        bookmarkedVideos: [],
+        solvedQuestionsCount: 0,
+        correctAnswersCount: 0,
+        lastStudyDate: new Date().toISOString()
+      };
+      localStorage.setItem("enemflix_user_stats", JSON.stringify(initialStats));
+      localStorage.setItem("enemflix_video_progress", JSON.stringify([]));
+      localStorage.setItem("enemflix_simulated_exams", JSON.stringify([]));
+      localStorage.setItem("enemflix_essays", JSON.stringify([]));
 
       // 4. Salvar documento no Firestore
       try {
@@ -273,6 +289,32 @@ export default function LeadCapture({ onCapture, alertMessage }: LeadCaptureProp
         };
 
         localStorage.setItem("enemflix_user_profile", JSON.stringify(profile));
+
+        // Restaurar estatísticas e progresso salvos no banco de dados
+        if (serverUser.level !== undefined || serverUser.xp !== undefined || serverUser.completedVideos !== undefined) {
+          const statsToSave = {
+            level: serverUser.level || 1,
+            xp: serverUser.xp || 0,
+            xpToNextLevel: serverUser.xpToNextLevel || 1000,
+            streak: serverUser.streak || 1,
+            hoursStudied: serverUser.hoursStudied || 0,
+            completedVideos: Array.isArray(serverUser.completedVideos) ? serverUser.completedVideos : [],
+            bookmarkedVideos: Array.isArray(serverUser.bookmarkedVideos) ? serverUser.bookmarkedVideos : [],
+            solvedQuestionsCount: serverUser.solvedQuestionsCount || 0,
+            correctAnswersCount: serverUser.correctAnswersCount || 0,
+            lastStudyDate: serverUser.lastStudyDate || new Date().toISOString()
+          };
+          localStorage.setItem("enemflix_user_stats", JSON.stringify(statsToSave));
+        }
+        if (Array.isArray(serverUser.videoProgress)) {
+          localStorage.setItem("enemflix_video_progress", JSON.stringify(serverUser.videoProgress));
+        }
+        if (Array.isArray(serverUser.simulatedExams)) {
+          localStorage.setItem("enemflix_simulated_exams", JSON.stringify(serverUser.simulatedExams));
+        }
+        if (Array.isArray(serverUser.essays)) {
+          localStorage.setItem("enemflix_essays", JSON.stringify(serverUser.essays));
+        }
 
         // Atualizar preferências e carimbo de acesso no Firestore
         try {

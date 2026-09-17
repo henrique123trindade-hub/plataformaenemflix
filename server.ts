@@ -12,6 +12,8 @@ import {
   saveUserToFirestore, 
   updateUserInFirestore, 
   deleteUserFromFirestore, 
+  getUserProgressFromFirestore,
+  saveUserProgressToFirestore,
   calculateUsage, 
   hashPassword, 
   verifyPassword,
@@ -348,23 +350,6 @@ async function startServer() {
   // Senha de Acesso: "pirulitobaby"
   // Limite de Uso: 1 ano / 365 dias
   // ==========================================
-  const ADMIN_PASSWORD = "pirulitobaby";
-
-  function isDemoUser(u: any): boolean {
-    if (!u) return false;
-    const uid = u.uid || "";
-    const email = (u.email || "").toLowerCase();
-    return (
-      uid.startsWith("usr_demo_") ||
-      uid.startsWith("guest_demo_") ||
-      uid === "test_123" ||
-      email === "lucas.medicina@gmail.com" ||
-      email === "mariana.direito@outlook.com" ||
-      email === "rodrigo.expirado@gmail.com"
-    );
-  }
-
-
   // 1. Cadastrar novo usuário (Salvo diretamente no Firestore Cloud)
   app.post("/api/auth/register", async (req, res) => {
     try {
@@ -374,20 +359,33 @@ async function startServer() {
       }
 
       const normalizedEmail = email.trim().toLowerCase();
-      if (password.length < 6) {
-        return res.status(400).json({ success: false, error: "A senha deve conter no mínimo 6 caracteres." });
+      if (String(password).trim().length < 4) {
+        return res.status(400).json({ success: false, error: "A senha deve conter no mínimo 4 caracteres." });
       }
 
       const existingUser = await getUserByEmailFromFirestore(normalizedEmail);
       if (existingUser) {
+        // Se a senha bater, faz o login direto de forma transparente
+        if (existingUser.password && verifyPassword(String(password).trim(), existingUser.password)) {
+          const now = new Date().toISOString();
+          await updateUserInFirestore(existingUser.uid, {
+            lastLogin: now,
+            lastLoginAt: now,
+            loginCount: (existingUser.loginCount || 1) + 1
+          });
+          const { password: _, ...safeUser } = existingUser;
+          return res.json({
+            success: true,
+            user: { ...safeUser, lastLogin: now, loginCount: (existingUser.loginCount || 1) + 1 }
+          });
+        }
         return res.status(400).json({ 
           success: false, 
-          error: "Este e-mail já está cadastrado. Faça login com suas credenciais." 
+          error: "Este e-mail já está cadastrado. Faça login com sua senha." 
         });
       }
 
       const now = new Date().toISOString();
-      const expiresAt = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString();
       const uid = "usr_" + Date.now() + "_" + Math.random().toString(36).substring(2, 7);
 
       const newRecord: FirestoreUser = {
@@ -403,27 +401,29 @@ async function startServer() {
         lastLogin: now,
         lastLoginAt: now,
         lastActiveAt: now,
-        expiresAt,
-        limitDays: 365,
         loginCount: 1,
-        status: "active",
-        isBanned: false,
-        isDisconnected: false,
-        userAgent: req.headers["user-agent"] || "Web App"
+        // Progresso inicial seguro
+        level: 1,
+        xp: 0,
+        xpToNextLevel: 1000,
+        streak: 1,
+        hoursStudied: 0,
+        completedVideos: [],
+        bookmarkedVideos: [],
+        solvedQuestionsCount: 0,
+        correctAnswersCount: 0,
+        lastStudyDate: now,
+        videoProgress: [],
+        simulatedExams: [],
+        essays: []
       };
 
       await saveUserToFirestore(newRecord);
 
-      const usage = calculateUsage(newRecord.createdAt);
       const { password: _, ...safeUser } = newRecord;
-
       return res.json({
         success: true,
-        user: {
-          ...safeUser,
-          ...usage,
-          status: "active"
-        }
+        user: safeUser
       });
     } catch (err: any) {
       console.error("Erro em /api/auth/register:", err);
@@ -443,9 +443,10 @@ async function startServer() {
       const user = await getUserByEmailFromFirestore(normalizedEmail);
 
       if (!user) {
-        return res.status(401).json({ 
+        return res.status(404).json({ 
           success: false, 
-          error: "Nenhuma conta encontrada com este e-mail. Por favor, crie sua conta primeiro." 
+          notFound: true,
+          error: "Nenhuma conta encontrada com este e-mail. Caso seja seu primeiro acesso, crie sua conta." 
         });
       }
 
@@ -454,36 +455,12 @@ async function startServer() {
         return res.status(401).json({ success: false, error: "Senha incorreta. Verifique seus dados." });
       }
 
-      const usage = calculateUsage(user.createdAt);
-
-      if (user.isBanned || user.status === "banned") {
-        return res.status(403).json({
-          success: false,
-          isBanned: true,
-          isDisconnected: true,
-          error: "Esta conta foi suspensa ou banida pelo administrador do sistema."
-        });
-      }
-
-      if (usage.isExpired || user.status === "expired") {
-        return res.status(403).json({
-          success: false,
-          isExpired: true,
-          isDisconnected: true,
-          error: "O período limite de uso de 365 dias (1 ano) expirou para esta conta."
-        });
-      }
-
       const now = new Date().toISOString();
       await updateUserInFirestore(user.uid, {
         lastLogin: now,
         lastLoginAt: now,
         lastActiveAt: now,
-        isDisconnected: false,
-        disconnectedAt: null,
-        status: "active",
-        loginCount: (user.loginCount || 1) + 1,
-        userAgent: req.headers["user-agent"] || user.userAgent
+        loginCount: (user.loginCount || 1) + 1
       });
 
       const { password: _, ...safeUser } = user;
@@ -493,9 +470,7 @@ async function startServer() {
           ...safeUser,
           lastLogin: now,
           lastLoginAt: now,
-          isDisconnected: false,
-          status: "active",
-          ...usage
+          loginCount: (user.loginCount || 1) + 1
         }
       });
     } catch (err: any) {
@@ -504,7 +479,7 @@ async function startServer() {
     }
   });
 
-  // 3. Gravar ou atualizar login de usuário no Firestore Cloud
+  // 3. Gravar ou atualizar perfil de usuário no Firestore Cloud
   app.post("/api/auth/record-login", async (req, res) => {
     try {
       const { uid, email, name, phone, targetCourse, targetScore, type } = req.body;
@@ -513,10 +488,6 @@ async function startServer() {
       }
 
       const normalizedEmail = email ? email.trim().toLowerCase() : "";
-      if (isDemoUser({ uid, email: normalizedEmail })) {
-        return res.json({ success: true });
-      }
-
       const now = new Date().toISOString();
       let existing = uid ? await getUserByUidFromFirestore(uid) : null;
       if (!existing && normalizedEmail) {
@@ -524,42 +495,15 @@ async function startServer() {
       }
 
       if (existing) {
-        const usage = calculateUsage(existing.createdAt);
-
-        if (existing.isBanned || existing.status === "banned") {
-          return res.status(403).json({
-            success: false,
-            isBanned: true,
-            isDisconnected: true,
-            isExpired: usage.isExpired,
-            message: "Esta conta foi banida pelo administrador do sistema."
-          });
-        }
-
-        if (usage.isExpired || existing.status === "expired") {
-          return res.status(403).json({
-            success: false,
-            isBanned: false,
-            isDisconnected: true,
-            isExpired: true,
-            message: "O período de uso desta conta atingiu o limite de 365 dias (1 ano)."
-          });
-        }
-
         await updateUserInFirestore(existing.uid, {
           lastLogin: now,
           lastLoginAt: now,
           lastActiveAt: now,
           loginCount: (existing.loginCount || 1) + 1,
-          isDisconnected: false,
-          disconnectedAt: null,
-          status: "active",
           name: name || existing.name,
           phone: phone || existing.phone,
           targetCourse: targetCourse || existing.targetCourse,
-          targetScore: targetScore || existing.targetScore,
-          userAgent: req.headers["user-agent"] || existing.userAgent,
-          type: type || existing.type
+          targetScore: targetScore || existing.targetScore
         });
 
         const { password: _, ...safeUser } = existing;
@@ -568,16 +512,12 @@ async function startServer() {
           user: {
             ...safeUser,
             lastLogin: now,
-            lastLoginAt: now,
-            isDisconnected: false,
-            status: "active",
-            ...usage
+            lastLoginAt: now
           }
         });
       }
 
-      // Novo login/cadastro
-      const expiresAt = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString();
+      // Novo registro
       const finalUid = uid || ("usr_" + Date.now() + "_" + Math.random().toString(36).substring(2, 7));
       const newRecord: FirestoreUser = {
         uid: finalUid,
@@ -586,31 +526,32 @@ async function startServer() {
         phone: phone || "",
         targetCourse: targetCourse || "Medicina",
         targetScore: targetScore || 750,
-        type: type || (normalizedEmail.includes("convidado") ? "guest" : "auth"),
+        type: type || "auth",
         createdAt: now,
         lastLogin: now,
         lastLoginAt: now,
         lastActiveAt: now,
-        expiresAt,
-        limitDays: 365,
         loginCount: 1,
-        status: "active",
-        isBanned: false,
-        isDisconnected: false,
-        userAgent: req.headers["user-agent"] || ""
+        level: 1,
+        xp: 0,
+        xpToNextLevel: 1000,
+        streak: 1,
+        hoursStudied: 0,
+        completedVideos: [],
+        bookmarkedVideos: [],
+        solvedQuestionsCount: 0,
+        correctAnswersCount: 0,
+        lastStudyDate: now,
+        videoProgress: [],
+        simulatedExams: [],
+        essays: []
       };
 
       await saveUserToFirestore(newRecord);
-
-      const usage = calculateUsage(newRecord.createdAt);
       const { password: _, ...safeUser } = newRecord;
       return res.json({
         success: true,
-        user: {
-          ...safeUser,
-          ...usage,
-          status: "active"
-        }
+        user: safeUser
       });
     } catch (err: any) {
       console.error("Erro em /api/auth/record-login:", err);
@@ -618,321 +559,56 @@ async function startServer() {
     }
   });
 
-  // 4. Verificar status da sessão
-  app.post("/api/auth/check-status", async (req, res) => {
+  // 4. Salvar progresso do usuário no Firestore Cloud
+  app.post("/api/user/progress", async (req, res) => {
     try {
-      const { uid, email } = req.body;
-      if (!uid && !email) {
-        return res.json({ isBanned: false, isDisconnected: false, isExpired: false });
+      const { uid, stats, videoProgress, simulatedExams, essays, aiConversations } = req.body;
+      if (!uid) {
+        return res.status(400).json({ success: false, error: "UID é obrigatório" });
       }
 
-      let user: FirestoreUser | null = null;
-      if (uid) user = await getUserByUidFromFirestore(uid);
-      if (!user && email) user = await getUserByEmailFromFirestore(String(email).trim().toLowerCase());
-
-      if (!user) {
-        return res.json({ isBanned: false, isDisconnected: false, isExpired: false, exists: false });
+      const updates: any = {};
+      if (stats) {
+        if (typeof stats.level === "number") updates.level = stats.level;
+        if (typeof stats.xp === "number") updates.xp = stats.xp;
+        if (typeof stats.xpToNextLevel === "number") updates.xpToNextLevel = stats.xpToNextLevel;
+        if (typeof stats.streak === "number") updates.streak = stats.streak;
+        if (typeof stats.hoursStudied === "number") updates.hoursStudied = stats.hoursStudied;
+        if (Array.isArray(stats.completedVideos)) updates.completedVideos = stats.completedVideos;
+        if (Array.isArray(stats.bookmarkedVideos)) updates.bookmarkedVideos = stats.bookmarkedVideos;
+        if (typeof stats.solvedQuestionsCount === "number") updates.solvedQuestionsCount = stats.solvedQuestionsCount;
+        if (typeof stats.correctAnswersCount === "number") updates.correctAnswersCount = stats.correctAnswersCount;
+        if (stats.lastStudyDate) updates.lastStudyDate = stats.lastStudyDate;
       }
+      if (Array.isArray(videoProgress)) updates.videoProgress = videoProgress;
+      if (Array.isArray(simulatedExams)) updates.simulatedExams = simulatedExams;
+      if (Array.isArray(essays)) updates.essays = essays;
+      if (Array.isArray(aiConversations)) updates.aiConversations = aiConversations;
 
-      const usage = calculateUsage(user.createdAt);
-      const isBanned = !!user.isBanned || user.status === "banned";
-      const isDisconnected = !!user.isDisconnected || user.status === "disconnected";
-      const isExpired = usage.isExpired || user.status === "expired";
-
-      return res.json({
-        exists: true,
-        isBanned,
-        isDisconnected,
-        isExpired,
-        status: isBanned ? "banned" : isDisconnected ? "disconnected" : isExpired ? "expired" : "active",
-        daysUsing: usage.daysUsing,
-        daysRemaining: usage.daysRemaining,
-        timeUsingFormatted: usage.timeUsingFormatted,
-        limitDays: 365
-      });
+      await saveUserProgressToFirestore(uid, updates);
+      return res.json({ success: true });
     } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
-
-  // 5. Autenticação do Administrador
-  app.post("/api/admin/auth", (req, res) => {
-    try {
-      const { password } = req.body || {};
-      const cleanPassword = typeof password === "string" ? password.trim() : "";
-      if (cleanPassword.toLowerCase() === ADMIN_PASSWORD.toLowerCase()) {
-        return res.json({ success: true });
-      }
-      return res.status(401).json({ success: false, error: "Senha administrativa incorreta" });
-    } catch (err: any) {
+      console.error("Erro ao salvar progresso:", err);
       return res.status(500).json({ success: false, error: err.message });
     }
   });
 
-  // Middleware de autorização para o painel admin
-  const checkAdminAuth = (req: express.Request, res: express.Response, next: express.NextFunction) => {
-    const headerPass = req.headers["x-admin-password"];
-    const queryPass = req.query.password;
-    const bodyPass = req.body ? req.body.password : undefined;
-    const password = (headerPass || queryPass || bodyPass || "") as string;
-
-    if (typeof password === "string" && password.trim().toLowerCase() === ADMIN_PASSWORD.toLowerCase()) {
-      return next();
-    }
-    return res.status(401).json({ success: false, error: "Acesso não autorizado. Senha de administrador incorreta." });
-  };
-
-  // 6. Listar todos os logins e cadastros do Firestore Cloud
-  app.get("/api/admin/users", checkAdminAuth, async (req, res) => {
+  // 5. Carregar progresso do usuário do Firestore Cloud
+  app.get("/api/user/progress", async (req, res) => {
     try {
-      const allFirestoreUsers = await getAllUsersFromFirestore(true);
-      const realUsers = allFirestoreUsers.filter(u => !isDemoUser(u));
-      
-      const enrichedUsers = realUsers.map(user => {
-        const usage = calculateUsage(user.createdAt);
-        
-        let status: "active" | "disconnected" | "banned" | "expired" = "active";
-        if (user.isBanned || user.status === "banned") {
-          status = "banned";
-        } else if (usage.isExpired || user.status === "expired") {
-          status = "expired";
-        } else if (user.isDisconnected || user.status === "disconnected") {
-          status = "disconnected";
-        }
-
-        const { password: _, ...safeUser } = user;
-
-        return {
-          ...safeUser,
-          createdAt: user.createdAt,
-          lastLogin: user.lastLogin || user.lastLoginAt || user.createdAt,
-          lastLoginAt: user.lastLoginAt || user.lastLogin || user.createdAt,
-          lastActiveAt: user.lastActiveAt || user.lastLoginAt || user.createdAt,
-          expiresAt: usage.expirationDate,
-          ...usage,
-          status,
-          isBanned: status === "banned",
-          isDisconnected: status === "disconnected"
-        };
-      });
-
-      // Ordenar por último login (mais recentes primeiro)
-      enrichedUsers.sort((a, b) => new Date(b.lastLogin || b.createdAt).getTime() - new Date(a.lastLogin || a.createdAt).getTime());
-
-      const now = new Date();
-      res.json({
-        success: true,
-        users: enrichedUsers,
-        totalLogins: enrichedUsers.length,
-        stats: {
-          total: enrichedUsers.length,
-          active: enrichedUsers.filter(u => u.status === "active").length,
-          disconnected: enrichedUsers.filter(u => u.status === "disconnected").length,
-          banned: enrichedUsers.filter(u => u.status === "banned").length,
-          expired: enrichedUsers.filter(u => u.status === "expired").length,
-          newToday: enrichedUsers.filter(u => {
-            const created = new Date(u.createdAt);
-            return created.toDateString() === now.toDateString();
-          }).length
-        }
-      });
-    } catch (err: any) {
-      console.error("Erro em /api/admin/users:", err);
-      res.status(500).json({ success: false, error: err.message });
-    }
-  });
-
-  // 7. Desconectar usuário
-  app.post("/api/admin/disconnect", checkAdminAuth, async (req, res) => {
-    try {
-      const { uid } = req.body;
+      const uid = String(req.query.uid || "");
       if (!uid) {
         return res.status(400).json({ success: false, error: "UID é obrigatório" });
       }
 
-      const user = await getUserByUidFromFirestore(uid);
-      if (!user) {
+      const progress = await getUserProgressFromFirestore(uid);
+      if (!progress) {
         return res.status(404).json({ success: false, error: "Usuário não encontrado" });
       }
 
-      await updateUserInFirestore(uid, {
-        isDisconnected: true,
-        disconnectedAt: new Date().toISOString(),
-        status: user.isBanned ? "banned" : "disconnected"
-      });
-
-      res.json({ success: true, message: `Usuário ${user.name} desconectado com sucesso.` });
+      return res.json({ success: true, progress });
     } catch (err: any) {
-      res.status(500).json({ success: false, error: err.message });
-    }
-  });
-
-  // 8. Reconectar usuário (remover flag de desconexão forçada)
-  app.post("/api/admin/reconnect", checkAdminAuth, async (req, res) => {
-    try {
-      const { uid } = req.body;
-      if (!uid) {
-        return res.status(400).json({ success: false, error: "UID é obrigatório" });
-      }
-
-      const user = await getUserByUidFromFirestore(uid);
-      if (!user) {
-        return res.status(404).json({ success: false, error: "Usuário não encontrado" });
-      }
-
-      await updateUserInFirestore(uid, {
-        isDisconnected: false,
-        disconnectedAt: null,
-        status: user.isBanned ? "banned" : "active"
-      });
-
-      res.json({ success: true, message: `Sessão de ${user.name} restabelecida.` });
-    } catch (err: any) {
-      res.status(500).json({ success: false, error: err.message });
-    }
-  });
-
-  // 9. Banir ou Desbanir usuário
-  app.post("/api/admin/ban", checkAdminAuth, async (req, res) => {
-    try {
-      const { uid, banned, reason } = req.body;
-      if (!uid) {
-        return res.status(400).json({ success: false, error: "UID é obrigatório" });
-      }
-
-      const shouldBan = banned !== false;
-      const user = await getUserByUidFromFirestore(uid);
-      if (!user) {
-        return res.status(404).json({ success: false, error: "Usuário não encontrado" });
-      }
-
-      await updateUserInFirestore(uid, {
-        isBanned: shouldBan,
-        bannedAt: shouldBan ? new Date().toISOString() : null,
-        banReason: shouldBan ? (reason || "Violação das regras de acesso") : null,
-        status: shouldBan ? "banned" : "active",
-        isDisconnected: shouldBan ? true : user.isDisconnected
-      });
-
-      res.json({ 
-        success: true, 
-        message: shouldBan ? `Usuário ${user.name} banido com sucesso.` : `Banimento de ${user.name} revogado.` 
-      });
-    } catch (err: any) {
-      res.status(500).json({ success: false, error: err.message });
-    }
-  });
-
-  // 10. Resetar prazo de 365 dias (renovar acesso)
-  app.post("/api/admin/reset-time", checkAdminAuth, async (req, res) => {
-    try {
-      const { uid } = req.body;
-      const user = await getUserByUidFromFirestore(uid);
-      if (!user) {
-        return res.status(404).json({ success: false, error: "Usuário não encontrado" });
-      }
-
-      const now = new Date().toISOString();
-      const expiresAt = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString();
-
-      await updateUserInFirestore(uid, {
-        createdAt: now,
-        expiresAt,
-        isDisconnected: false,
-        status: user.isBanned ? "banned" : "active"
-      });
-
-      res.json({ success: true, message: `Prazo de 365 dias de ${user.name} renovado com sucesso.` });
-    } catch (err: any) {
-      res.status(500).json({ success: false, error: err.message });
-    }
-  });
-
-  // 11. Excluir registro do histórico
-  app.post("/api/admin/delete-user", checkAdminAuth, async (req, res) => {
-    try {
-      const { uid } = req.body;
-      await deleteUserFromFirestore(uid);
-      res.json({ success: true, message: "Registro removido com sucesso do Firestore." });
-    } catch (err: any) {
-      res.status(500).json({ success: false, error: err.message });
-    }
-  });
-
-  // 12. Criar usuário manualmente pelo painel administrativo
-  app.post("/api/admin/create-user", checkAdminAuth, async (req, res) => {
-    try {
-      const { name, email, password, phone, targetCourse, targetScore } = req.body;
-      if (!email) {
-        return res.status(400).json({ success: false, error: "E-mail é obrigatório." });
-      }
-
-      const normalizedEmail = email.trim().toLowerCase();
-      const existing = await getUserByEmailFromFirestore(normalizedEmail);
-      if (existing) {
-        return res.status(400).json({ success: false, error: "Este e-mail já existe no banco de dados." });
-      }
-
-      const now = new Date().toISOString();
-      const expiresAt = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString();
-      const uid = "usr_" + Date.now() + "_" + Math.random().toString(36).substring(2, 7);
-      const userPass = (password && String(password).trim()) || "enem1234";
-
-      const newRecord: FirestoreUser = {
-        uid,
-        email: normalizedEmail,
-        name: (name && name.trim()) || normalizedEmail.split("@")[0] || "Estudante",
-        password: hashPassword(userPass),
-        phone: (phone && phone.trim()) || "",
-        targetCourse: targetCourse || "Medicina",
-        targetScore: Number(targetScore) || 750,
-        type: "auth",
-        createdAt: now,
-        lastLogin: now,
-        lastLoginAt: now,
-        lastActiveAt: now,
-        expiresAt,
-        limitDays: 365,
-        loginCount: 1,
-        status: "active",
-        isBanned: false,
-        isDisconnected: false,
-        userAgent: "Criado pelo Administrador"
-      };
-
-      await saveUserToFirestore(newRecord);
-
-      const usage = calculateUsage(newRecord.createdAt);
-      const { password: _, ...safeUser } = newRecord;
-
-      res.json({
-        success: true,
-        message: `Conta de ${newRecord.name} criada com sucesso no Firestore!`,
-        user: {
-          ...safeUser,
-          ...usage,
-          status: "active"
-        }
-      });
-    } catch (err: any) {
-      res.status(500).json({ success: false, error: err.message });
-    }
-  });
-
-  // 13. Limpar todas as contas de teste/demo definitivamente
-  app.post("/api/admin/purge-demos", checkAdminAuth, async (req, res) => {
-    try {
-      const all = await getAllUsersFromFirestore(true);
-      let removed = 0;
-      for (const u of all) {
-        if (isDemoUser(u)) {
-          await deleteUserFromFirestore(u.uid);
-          removed++;
-        }
-      }
-      res.json({ success: true, count: removed, message: "Contas de demonstração removidas com sucesso." });
-    } catch (err: any) {
-      res.status(500).json({ success: false, error: err.message });
+      return res.status(500).json({ success: false, error: err.message });
     }
   });
 

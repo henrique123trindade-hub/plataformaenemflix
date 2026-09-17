@@ -23,7 +23,6 @@ import Simulator from "./components/Simulator";
 import AIPanel from "./components/AIPanel";
 import EssayTraining from "./components/EssayTraining";
 import UserProfileTab from "./components/UserProfileTab";
-import AdminModal from "./components/AdminModal";
 
 import { Award, Compass, Search, Sparkles, Home, BookOpen, ClipboardList, Brain, PenTool, User } from "lucide-react";
 import { 
@@ -42,29 +41,65 @@ import {
 } from "./lib/firebase";
 
 export default function App() {
-  // 1. Core Profile & Lead Capture States
-  const [userProfile, setUserProfile] = useState<LeadProfile | null>(null);
-  const [isInitializing, setIsInitializing] = useState<boolean>(true);
+  // 1. Core Profile & Lead Capture States (Persisted with localStorage & Firestore)
+  const [userProfile, setUserProfile] = useState<LeadProfile | null>(() => {
+    try {
+      const saved = localStorage.getItem("enemflix_user_profile");
+      if (saved) return JSON.parse(saved);
+    } catch (e) {}
+    return null;
+  });
+  const [isInitializing, setIsInitializing] = useState<boolean>(false);
 
   // 2. Core Gamified Statistics States
-  const [userStats, setUserStats] = useState<UserStats>({
-    level: 1,
-    xp: 0,
-    xpToNextLevel: 1000,
-    streak: 1,
-    hoursStudied: 0.8,
-    completedVideos: [],
-    bookmarkedVideos: [],
-    solvedQuestionsCount: 0,
-    correctAnswersCount: 0,
-    lastStudyDate: new Date().toISOString()
+  const [userStats, setUserStats] = useState<UserStats>(() => {
+    try {
+      const saved = localStorage.getItem("enemflix_user_stats");
+      if (saved) return JSON.parse(saved);
+    } catch (e) {}
+    return {
+      level: 1,
+      xp: 0,
+      xpToNextLevel: 1000,
+      streak: 1,
+      hoursStudied: 0,
+      completedVideos: [],
+      bookmarkedVideos: [],
+      solvedQuestionsCount: 0,
+      correctAnswersCount: 0,
+      lastStudyDate: new Date().toISOString()
+    };
   });
 
   // 3. Subcollection States (Sync with Firestore for Auth, or LocalStorage for Guest)
-  const [videoProgress, setVideoProgress] = useState<VideoProgress[]>([]);
-  const [simulatedExams, setSimulatedExams] = useState<SimulatedExamResult[]>([]);
-  const [essays, setEssays] = useState<EssaySubmission[]>([]);
-  const [aiConversations, setAiConversations] = useState<AIConversation[]>([]);
+  const [videoProgress, setVideoProgress] = useState<VideoProgress[]>(() => {
+    try {
+      const saved = localStorage.getItem("enemflix_video_progress");
+      if (saved) return JSON.parse(saved);
+    } catch (e) {}
+    return [];
+  });
+  const [simulatedExams, setSimulatedExams] = useState<SimulatedExamResult[]>(() => {
+    try {
+      const saved = localStorage.getItem("enemflix_simulated_exams");
+      if (saved) return JSON.parse(saved);
+    } catch (e) {}
+    return [];
+  });
+  const [essays, setEssays] = useState<EssaySubmission[]>(() => {
+    try {
+      const saved = localStorage.getItem("enemflix_essays");
+      if (saved) return JSON.parse(saved);
+    } catch (e) {}
+    return [];
+  });
+  const [aiConversations, setAiConversations] = useState<AIConversation[]>(() => {
+    try {
+      const saved = localStorage.getItem("enemflix_ai_conversations");
+      if (saved) return JSON.parse(saved);
+    } catch (e) {}
+    return [];
+  });
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
 
   // 4. Navigation and Interface States
@@ -73,75 +108,49 @@ export default function App() {
   const [selectedVideo, setSelectedVideo] = useState<Video | null>(null);
   const [isSyncing, setIsSyncing] = useState<boolean>(false);
 
-  // 5. Admin & Session Restriction States (F3 shortcut & 365d limit)
-  const [isAdminOpen, setIsAdminOpen] = useState<boolean>(false);
-  const [sessionAlertMessage, setSessionAlertMessage] = useState<string>("");
-
-  // Global F3 shortcut listener (also supports Ctrl+Shift+A / Cmd+Shift+A)
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (
-        e.key === "F3" || 
-        e.code === "F3" || 
-        ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === "A" || e.key === "a"))
-      ) {
-        e.preventDefault();
-        setIsAdminOpen(prev => !prev);
-      }
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, []);
-
-  // Monitor live session status (enforces disconnect, ban and 365-day limit)
+  // Sincronizar progresso do usuário no Firestore em segundo plano
   useEffect(() => {
     if (!userProfile?.uid) return;
 
-    const checkStatus = async () => {
-      try {
-        const res = await fetch("/api/auth/check-status", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            uid: userProfile.uid,
-            email: userProfile.email
-          })
-        });
-        const data = await res.json();
-        
-        if (data.isBanned || data.isDisconnected || data.isExpired) {
-          try {
-            await signOut(auth);
-          } catch (e) {}
-          localStorage.removeItem("enemflix_user_profile");
-          setUserProfile(null);
-          
-          if (data.isBanned) {
-            setSessionAlertMessage("Esta conta foi suspensa/banida pelo administrador.");
-          } else if (data.isExpired) {
-            setSessionAlertMessage("Seu limite de 1 ano (365 dias) de uso na plataforma EnemFlix expirou.");
-          } else {
-            setSessionAlertMessage("Sua sessão foi encerrada pelo administrador.");
+    // Buscar progresso no backend
+    fetch(`/api/user/progress?uid=${encodeURIComponent(userProfile.uid)}`)
+      .then(res => res.json())
+      .then(data => {
+        if (data.success && data.progress) {
+          const p = data.progress;
+          setUserStats(prev => {
+            const merged: UserStats = {
+              level: Math.max(prev.level, p.level || 1),
+              xp: Math.max(prev.xp, p.xp || 0),
+              xpToNextLevel: p.xpToNextLevel || prev.xpToNextLevel,
+              streak: Math.max(prev.streak, p.streak || 1),
+              hoursStudied: Math.max(prev.hoursStudied, p.hoursStudied || 0),
+              completedVideos: Array.from(new Set([...prev.completedVideos, ...(p.completedVideos || [])])),
+              bookmarkedVideos: Array.from(new Set([...prev.bookmarkedVideos, ...(p.bookmarkedVideos || [])])),
+              solvedQuestionsCount: Math.max(prev.solvedQuestionsCount, p.solvedQuestionsCount || 0),
+              correctAnswersCount: Math.max(prev.correctAnswersCount, p.correctAnswersCount || 0),
+              lastStudyDate: p.lastStudyDate || prev.lastStudyDate
+            };
+            localStorage.setItem("enemflix_user_stats", JSON.stringify(merged));
+            return merged;
+          });
+
+          if (Array.isArray(p.videoProgress) && p.videoProgress.length > 0) {
+            setVideoProgress(p.videoProgress);
+            localStorage.setItem("enemflix_video_progress", JSON.stringify(p.videoProgress));
+          }
+          if (Array.isArray(p.simulatedExams) && p.simulatedExams.length > 0) {
+            setSimulatedExams(p.simulatedExams);
+            localStorage.setItem("enemflix_simulated_exams", JSON.stringify(p.simulatedExams));
+          }
+          if (Array.isArray(p.essays) && p.essays.length > 0) {
+            setEssays(p.essays);
+            localStorage.setItem("enemflix_essays", JSON.stringify(p.essays));
           }
         }
-      } catch (e) {
-        // Ignored on network hiccups
-      }
-    };
-
-    checkStatus();
-    const interval = setInterval(checkStatus, 3000);
-    window.addEventListener("focus", checkStatus);
-    return () => {
-      clearInterval(interval);
-      window.removeEventListener("focus", checkStatus);
-    };
-  }, [userProfile?.uid, userProfile?.email]);
-
-  // Initialize app state
-  useEffect(() => {
-    setIsInitializing(false);
-  }, []);
+      })
+      .catch(() => {});
+  }, [userProfile?.uid]);
 
   // 5. Firebase Auth Sync Listener
   useEffect(() => {
@@ -323,20 +332,30 @@ export default function App() {
   // Save/sync stats state
   const saveStats = async (newStats: UserStats, currentProfile = userProfile) => {
     setUserStats(newStats);
+    localStorage.setItem("enemflix_user_stats", JSON.stringify(newStats));
 
     if (currentProfile && currentProfile.uid) {
-      // Sync to Firebase
+      // Sync to Firebase direct
       try {
         await setDoc(doc(db, "users", currentProfile.uid), {
           ...currentProfile,
           ...newStats
-        });
+        }, { merge: true });
       } catch (err) {
-        console.error("Error saving stats to Firestore:", err);
+        console.warn("Error saving stats to Firestore:", err);
       }
-    } else {
-      // Sync locally (Guest)
-      localStorage.setItem("enemflix_user_stats", JSON.stringify(newStats));
+
+      // Also persist to server endpoint for guarantee
+      try {
+        fetch("/api/user/progress", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            uid: currentProfile.uid,
+            stats: newStats
+          })
+        }).catch(() => {});
+      } catch (e) {}
     }
   };
 
@@ -482,7 +501,12 @@ export default function App() {
     setVideoProgress(updatedProgressList);
 
     if (userProfile && userProfile.uid) {
-      await setDoc(doc(db, "users", userProfile.uid, "videoProgress", videoId), progressLog);
+      setDoc(doc(db, "users", userProfile.uid, "videoProgress", videoId), progressLog).catch(() => {});
+      fetch("/api/user/progress", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ uid: userProfile.uid, videoProgress: updatedProgressList })
+      }).catch(() => {});
     } else {
       localStorage.setItem("enemflix_video_progress", JSON.stringify(updatedProgressList));
     }
@@ -528,7 +552,12 @@ export default function App() {
     setSimulatedExams(updatedExamsList);
 
     if (userProfile && userProfile.uid) {
-      await setDoc(doc(db, "users", userProfile.uid, "simulatedExams", newExamResult.examId), newExamResult);
+      setDoc(doc(db, "users", userProfile.uid, "simulatedExams", newExamResult.examId), newExamResult).catch(() => {});
+      fetch("/api/user/progress", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ uid: userProfile.uid, simulatedExams: updatedExamsList })
+      }).catch(() => {});
     } else {
       localStorage.setItem("enemflix_simulated_exams", JSON.stringify(updatedExamsList));
     }
@@ -549,7 +578,12 @@ export default function App() {
     setEssays(updatedEssaysList);
 
     if (userProfile && userProfile.uid) {
-      await setDoc(doc(db, "users", userProfile.uid, "essays", newEssay.id), newEssay);
+      setDoc(doc(db, "users", userProfile.uid, "essays", newEssay.id), newEssay).catch(() => {});
+      fetch("/api/user/progress", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ uid: userProfile.uid, essays: updatedEssaysList })
+      }).catch(() => {});
     } else {
       localStorage.setItem("enemflix_essays", JSON.stringify(updatedEssaysList));
     }
@@ -626,13 +660,9 @@ export default function App() {
   // Render Gate: Capture Leads first
   if (!userProfile || !userProfile.isLeadCaptured) {
     return (
-      <>
-        <LeadCapture 
-          onCapture={handleCaptureLead} 
-          alertMessage={sessionAlertMessage}
-        />
-        <AdminModal isOpen={isAdminOpen} onClose={() => setIsAdminOpen(false)} />
-      </>
+      <LeadCapture 
+        onCapture={handleCaptureLead} 
+      />
     );
   }
 
@@ -1002,9 +1032,6 @@ export default function App() {
           </div>
         </div>
       </footer>
-
-      {/* 6. Admin Panel Modal (Triggered by F3) */}
-      <AdminModal isOpen={isAdminOpen} onClose={() => setIsAdminOpen(false)} />
 
     </div>
   );
