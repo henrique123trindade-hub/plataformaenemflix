@@ -130,7 +130,7 @@ export default function App() {
     };
 
     checkStatus();
-    const interval = setInterval(checkStatus, 7000);
+    const interval = setInterval(checkStatus, 3000);
     window.addEventListener("focus", checkStatus);
     return () => {
       clearInterval(interval);

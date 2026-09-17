@@ -1,6 +1,7 @@
 import express from "express";
 import path from "path";
 import fs from "fs";
+import crypto from "crypto";
 import dotenv from "dotenv";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, Type } from "@google/genai";
@@ -418,6 +419,26 @@ async function startServer() {
     }
   }
 
+  function hashPassword(password: string): string {
+    const salt = crypto.randomBytes(16).toString("hex");
+    const hash = crypto.pbkdf2Sync(password, salt, 1000, 64, "sha512").toString("hex");
+    return `pbkdf2$${salt}$${hash}`;
+  }
+
+  function verifyPassword(password: string, stored: string): boolean {
+    if (!stored) return false;
+    if (!stored.startsWith("pbkdf2$")) {
+      // Compatibilidade retroativa para migração segura de senhas legadas
+      return stored === password;
+    }
+    const parts = stored.split("$");
+    if (parts.length !== 3) return false;
+    const salt = parts[1];
+    const hash = parts[2];
+    const verifyHash = crypto.pbkdf2Sync(password, salt, 1000, 64, "sha512").toString("hex");
+    return hash === verifyHash;
+  }
+
   function calculateUsage(createdAtIso: string) {
     const start = new Date(createdAtIso).getTime();
     const now = Date.now();
@@ -449,6 +470,7 @@ async function startServer() {
     const daysRemaining = Math.max(0, LIMIT_DAYS - daysUsing);
     const isExpired = daysUsing >= LIMIT_DAYS;
     const progressPercentage = Math.min(100, Math.round((daysUsing / LIMIT_DAYS) * 100));
+    const expirationDate = new Date(start + LIMIT_DAYS * 24 * 60 * 60 * 1000).toISOString();
 
     return {
       daysUsing,
@@ -456,6 +478,7 @@ async function startServer() {
       isExpired,
       progressPercentage,
       timeUsingFormatted,
+      expirationDate,
       limitDays: LIMIT_DAYS
     };
   }
@@ -489,7 +512,7 @@ async function startServer() {
         uid,
         email: normalizedEmail,
         name: (name && name.trim()) || normalizedEmail.split("@")[0] || "Estudante",
-        password: String(password).trim(),
+        password: hashPassword(String(password).trim()),
         phone: (phone && phone.trim()) || "",
         targetCourse: targetCourse || "Medicina",
         targetScore: Number(targetScore) || 750,
@@ -542,12 +565,12 @@ async function startServer() {
         });
       }
 
-      // Se usuário tem senha cadastrada, validar
-      if (user.password && user.password !== String(password).trim()) {
+      // Validar senha com hash seguro e migrar texto puro se necessário
+      const rawPassword = String(password).trim();
+      if (user.password && !verifyPassword(rawPassword, user.password)) {
         return res.status(401).json({ success: false, error: "Senha incorreta. Verifique seus dados." });
-      } else if (!user.password) {
-        // Se ainda não tinha senha salva (migração), memoriza
-        user.password = String(password).trim();
+      } else if (!user.password || !user.password.startsWith("pbkdf2$")) {
+        user.password = hashPassword(rawPassword);
       }
 
       const usage = calculateUsage(user.createdAt);
@@ -773,8 +796,10 @@ async function startServer() {
           status = "disconnected";
         }
 
+        const { password: _, ...safeUser } = user;
+
         return {
-          ...user,
+          ...safeUser,
           ...usage,
           status
         };
@@ -783,6 +808,7 @@ async function startServer() {
       // Ordenar por último login (mais recentes primeiro)
       enrichedUsers.sort((a, b) => new Date(b.lastLoginAt).getTime() - new Date(a.lastLoginAt).getTime());
 
+      const now = new Date();
       res.json({
         success: true,
         users: enrichedUsers,
@@ -792,7 +818,11 @@ async function startServer() {
           active: enrichedUsers.filter(u => u.status === "active").length,
           disconnected: enrichedUsers.filter(u => u.status === "disconnected").length,
           banned: enrichedUsers.filter(u => u.status === "banned").length,
-          expired: enrichedUsers.filter(u => u.status === "expired").length
+          expired: enrichedUsers.filter(u => u.status === "expired").length,
+          newToday: enrichedUsers.filter(u => {
+            const created = new Date(u.createdAt);
+            return created.toDateString() === now.toDateString();
+          }).length
         }
       });
     } catch (err: any) {
@@ -936,7 +966,7 @@ async function startServer() {
         uid,
         email: normalizedEmail,
         name: (name && name.trim()) || normalizedEmail.split("@")[0] || "Estudante",
-        password: userPass,
+        password: hashPassword(userPass),
         phone: (phone && phone.trim()) || "",
         targetCourse: targetCourse || "Medicina",
         targetScore: Number(targetScore) || 750,

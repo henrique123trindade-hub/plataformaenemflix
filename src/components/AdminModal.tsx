@@ -59,6 +59,7 @@ interface AdminUser {
   isExpired: boolean;
   progressPercentage: number;
   timeUsingFormatted: string;
+  expirationDate?: string;
   status: "active" | "disconnected" | "banned" | "expired";
 }
 
@@ -90,6 +91,7 @@ function calculateUserUsage(createdAtStr?: string) {
   const daysRemaining = Math.max(0, limitDays - daysUsing);
   const isExpired = daysUsing >= limitDays;
   const progressPercentage = Math.min(100, Math.round((daysUsing / limitDays) * 100));
+  const expirationDate = new Date(created.getTime() + limitDays * 24 * 60 * 60 * 1000).toISOString();
 
   let timeUsingFormatted = "";
   if (daysUsing === 0) {
@@ -111,7 +113,8 @@ function calculateUserUsage(createdAtStr?: string) {
     daysRemaining,
     isExpired,
     progressPercentage,
-    timeUsingFormatted
+    timeUsingFormatted,
+    expirationDate
   };
 }
 
@@ -146,6 +149,7 @@ function docToAdminUser(data: any, docId: string): AdminUser {
     isExpired,
     progressPercentage: usage.progressPercentage,
     timeUsingFormatted: usage.timeUsingFormatted,
+    expirationDate: usage.expirationDate,
     status
   };
 }
@@ -162,7 +166,7 @@ export default function AdminModal({ isOpen, onClose }: AdminModalProps) {
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [searchTerm, setSearchTerm] = useState("");
-  const [filterStatus, setFilterStatus] = useState<"all" | "active" | "disconnected" | "banned" | "expired">("all");
+  const [filterStatus, setFilterStatus] = useState<"all" | "active" | "disconnected" | "banned" | "expired" | "newToday">("all");
   const [actionMessage, setActionMessage] = useState<{ text: string; type: "success" | "error" } | null>(null);
   const [copiedUid, setCopiedUid] = useState<string | null>(null);
 
@@ -627,9 +631,16 @@ export default function AdminModal({ isOpen, onClose }: AdminModalProps) {
 
   // Filter and search
   const filteredUsers = useMemo(() => {
+    const today = new Date().toDateString();
     return users.filter(user => {
       // Status filter
-      if (filterStatus !== "all" && user.status !== filterStatus) {
+      if (filterStatus === "newToday") {
+        try {
+          if (new Date(user.createdAt).toDateString() !== today) return false;
+        } catch (e) {
+          return false;
+        }
+      } else if (filterStatus !== "all" && user.status !== filterStatus) {
         return false;
       }
       // Search term
@@ -647,12 +658,20 @@ export default function AdminModal({ isOpen, onClose }: AdminModalProps) {
 
   // Statistics
   const stats = useMemo(() => {
+    const today = new Date().toDateString();
     return {
       total: users.length,
       active: users.filter(u => u.status === "active").length,
       disconnected: users.filter(u => u.status === "disconnected").length,
       banned: users.filter(u => u.status === "banned").length,
-      expired: users.filter(u => u.status === "expired").length
+      expired: users.filter(u => u.status === "expired").length,
+      newToday: users.filter(u => {
+        try {
+          return new Date(u.createdAt).toDateString() === today;
+        } catch (e) {
+          return false;
+        }
+      }).length
     };
   }, [users]);
 
@@ -751,9 +770,6 @@ export default function AdminModal({ isOpen, onClose }: AdminModalProps) {
             <div className="w-14 h-14 rounded-2xl bg-[#e50914]/15 border border-[#e50914]/30 flex items-center justify-center text-[#e50914] mb-4 shadow-lg shadow-[#e50914]/10">
               <Shield className="w-7 h-7" />
             </div>
-            <span className="text-[10px] font-black uppercase tracking-widest text-[#e50914] bg-[#e50914]/10 px-2.5 py-0.5 rounded-full border border-[#e50914]/20 mb-2">
-              Acesso F3
-            </span>
             <h2 className="text-xl font-black text-white tracking-tight">Painel Administrativo</h2>
             <p className="text-xs text-zinc-400 mt-1">
               Digite a senha mestra para visualizar e gerenciar todos os logins e permissões.
@@ -897,7 +913,7 @@ export default function AdminModal({ isOpen, onClose }: AdminModalProps) {
 
           {/* Top Metric Cards */}
           <div className="p-6 pb-4 border-b border-white/5 bg-[#121212]/50 shrink-0">
-            <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2.5">
               {/* Total */}
               <div 
                 onClick={() => setFilterStatus("all")}
@@ -906,11 +922,11 @@ export default function AdminModal({ isOpen, onClose }: AdminModalProps) {
                 }`}
               >
                 <div className="flex items-center justify-between text-zinc-400 mb-1">
-                  <span className="text-[11px] font-semibold">Total Logins</span>
+                  <span className="text-[11px] font-semibold">Total Geral</span>
                   <Users className="w-3.5 h-3.5" />
                 </div>
                 <div className="text-xl font-black text-white">{stats.total}</div>
-                <span className="text-[10px] text-zinc-500">Cadastros e acessos</span>
+                <span className="text-[10px] text-zinc-500">Cadastros</span>
               </div>
 
               {/* Ativos */}
@@ -926,6 +942,21 @@ export default function AdminModal({ isOpen, onClose }: AdminModalProps) {
                 </div>
                 <div className="text-xl font-black text-emerald-400">{stats.active}</div>
                 <span className="text-[10px] text-emerald-600">Acesso liberado</span>
+              </div>
+
+              {/* Novos Hoje */}
+              <div 
+                onClick={() => setFilterStatus("newToday")}
+                className={`p-3 rounded-xl border transition cursor-pointer ${
+                  filterStatus === "newToday" ? "bg-blue-950/30 border-blue-500/40" : "bg-white/5 border-white/5 hover:bg-white/10"
+                }`}
+              >
+                <div className="flex items-center justify-between text-blue-400 mb-1">
+                  <span className="text-[11px] font-semibold">Novos Hoje</span>
+                  <UserPlus className="w-3.5 h-3.5" />
+                </div>
+                <div className="text-xl font-black text-blue-400">{stats.newToday}</div>
+                <span className="text-[10px] text-blue-600">Cadastrados hoje</span>
               </div>
 
               {/* Desconectados */}
@@ -961,7 +992,7 @@ export default function AdminModal({ isOpen, onClose }: AdminModalProps) {
               {/* Expirados */}
               <div 
                 onClick={() => setFilterStatus("expired")}
-                className={`p-3 rounded-xl border col-span-2 sm:col-span-1 transition cursor-pointer ${
+                className={`p-3 rounded-xl border transition cursor-pointer ${
                   filterStatus === "expired" ? "bg-orange-950/30 border-orange-500/40" : "bg-white/5 border-white/5 hover:bg-white/10"
                 }`}
               >
@@ -1131,6 +1162,12 @@ export default function AdminModal({ isOpen, onClose }: AdminModalProps) {
                               <span className="text-[11px] text-zinc-500">• {user.targetCourse}</span>
                             )}
                           </div>
+
+                          <div className="text-[11px] text-zinc-400 flex items-center gap-1.5 pt-0.5">
+                            <Calendar className="w-3 h-3 text-zinc-500 shrink-0" />
+                            <span>Cadastro:</span>
+                            <span className="text-zinc-300 font-medium">{formatDatePtBr(user.createdAt)}</span>
+                          </div>
                         </div>
                       </div>
 
@@ -1152,11 +1189,11 @@ export default function AdminModal({ isOpen, onClose }: AdminModalProps) {
                         </div>
 
                         {/* Tempo usando o site (Limite 365 dias) */}
-                        <div className="space-y-1 min-w-[200px]">
+                        <div className="space-y-1 min-w-[220px]">
                           <div className="text-[11px] text-zinc-500 flex items-center justify-between">
                             <span className="flex items-center gap-1">
                               <Calendar className="w-3 h-3 text-zinc-400" />
-                              <span>Tempo de Uso (Limite 1 ano)</span>
+                              <span>Tempo de Acesso (365d)</span>
                             </span>
                             <span className="text-[10px] font-bold text-zinc-400">
                               {user.daysUsing || 0} / 365 dias
@@ -1179,10 +1216,17 @@ export default function AdminModal({ isOpen, onClose }: AdminModalProps) {
 
                           <div className="flex items-center justify-between text-[10px]">
                             <span className="text-zinc-400 font-medium">
-                              {user.timeUsingFormatted || "0 dias"}
+                              {user.daysUsing || 0} dias utilizados
                             </span>
-                            <span className={user.daysRemaining <= 30 ? "text-red-400 font-bold" : "text-zinc-500"}>
-                              {user.daysRemaining > 0 ? `${user.daysRemaining} dias restantes` : "Período Esgotado"}
+                            <span className={user.daysRemaining <= 30 ? "text-red-400 font-bold" : "text-emerald-400 font-medium"}>
+                              {user.daysRemaining > 0 ? `${user.daysRemaining} dias restantes` : "Período Vencido"}
+                            </span>
+                          </div>
+
+                          <div className="text-[10px] text-zinc-500 flex items-center justify-between pt-0.5">
+                            <span>Expiração:</span>
+                            <span className="text-zinc-400 font-medium">
+                              {user.expirationDate ? formatDatePtBr(user.expirationDate) : "365 dias após cadastro"}
                             </span>
                           </div>
                         </div>
@@ -1250,8 +1294,9 @@ export default function AdminModal({ isOpen, onClose }: AdminModalProps) {
               <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
               <span>Limite padrão do sistema: <strong>365 dias (1 ano)</strong> para todos os logins.</span>
             </div>
-            <div className="text-[11px] text-zinc-600">
-              Atalho secreto de acesso: <strong>F3</strong> • Senha: <strong>pirulitobaby</strong>
+            <div className="text-[11px] text-zinc-500 flex items-center gap-1.5">
+              <Shield className="w-3 h-3 text-emerald-400" />
+              <span>Painel Administrativo Seguro • Sincronização em tempo real ativa</span>
             </div>
           </div>
 
