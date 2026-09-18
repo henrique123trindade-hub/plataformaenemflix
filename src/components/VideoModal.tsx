@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
-import { X, Play, Check, Award, Heart, MessageSquare, Send, ThumbsUp, List, ChevronLeft, ChevronRight } from "lucide-react";
+import { X, Play, Check, Award, Heart, MessageSquare, Send, ThumbsUp, List, ChevronLeft, ChevronRight, ExternalLink, RefreshCw } from "lucide-react";
 import { Video } from "../types";
 
 interface VideoModalProps {
@@ -22,73 +22,73 @@ interface Comment {
 // Helper to parse YouTube playlist HTML in the client when backend API is unavailable
 function parsePlaylistHTML(html: string): any[] {
   let videos: any[] = [];
-  const startStr = "ytInitialData = ";
-  const startIndex = html.indexOf(startStr);
+  const match = html.match(/var ytInitialData = (\{.+?\});<\/script>/) ||
+                html.match(/window\["ytInitialData"\] = (\{.+?\});<\/script>/);
   
-  if (startIndex !== -1) {
-    const dataStart = startIndex + startStr.length;
-    const scriptEndIndex = html.indexOf("</script>", dataStart);
-    if (scriptEndIndex !== -1) {
-      let jsonStr = html.substring(dataStart, scriptEndIndex).trim();
-      if (jsonStr.endsWith(";")) {
-        jsonStr = jsonStr.slice(0, -1);
-      }
-      try {
-        const data = JSON.parse(jsonStr);
-        
-        const findPlaylistVideosInObject = (obj: any): any[] | null => {
-          if (!obj || typeof obj !== "object") return null;
-          
-          if (Array.isArray(obj)) {
-            const hasVideoRenderers = obj.some(item => item && (item.playlistVideoRenderer || item.videoRenderer || item.childVideoRenderer));
-            if (hasVideoRenderers) {
-              return obj;
-            }
-            for (const item of obj) {
-              const res = findPlaylistVideosInObject(item);
-              if (res) return res;
-            }
-          } else {
-            for (const key of Object.keys(obj)) {
-              const res = findPlaylistVideosInObject(obj[key]);
-              if (res) return res;
-            }
+  if (match && match[1]) {
+    try {
+      const data = JSON.parse(match[1]);
+      const seenIds = new Set<string>();
+
+      const findVideosRecursive = (obj: any) => {
+        if (!obj || typeof obj !== "object") return;
+
+        // Modern lockupViewModel
+        if (obj.lockupViewModel) {
+          const vm = obj.lockupViewModel;
+          const title = vm.metadata?.lockupMetadataViewModel?.title?.content ||
+                        vm.rendererContext?.accessibilityContext?.label;
+          const videoId = vm.rendererContext?.commandContext?.onTap?.innertubeCommand?.watchEndpoint?.videoId ||
+                          vm.contentImage?.thumbnailViewModel?.overlays?.[0]?.thumbnailBottomOverlayViewModel?.badges?.[0]?.thumbnailBadgeViewModel?.animationActivationTargetId;
+          const duration = vm.contentImage?.thumbnailViewModel?.overlays?.[0]?.thumbnailBottomOverlayViewModel?.badges?.[0]?.thumbnailBadgeViewModel?.text || "Vídeo";
+
+          if (videoId && title && !seenIds.has(videoId)) {
+            seenIds.add(videoId);
+            videos.push({
+              id: videoId,
+              title: title.trim(),
+              duration,
+              youtubeId: videoId
+            });
           }
-          return null;
-        };
-
-        const list = findPlaylistVideosInObject(data);
-        
-        if (list && Array.isArray(list)) {
-          videos = list
-            .map((item: any) => {
-              const renderer = item.playlistVideoRenderer || item.videoRenderer || item.childVideoRenderer;
-              if (!renderer) return null;
-              
-              const videoId = renderer.videoId;
-              if (!videoId) return null;
-
-              const title = renderer.title?.runs?.[0]?.text || renderer.title?.simpleText || renderer.title?.accessibility?.accessibilityData?.label || "Sem título";
-              const duration = renderer.lengthText?.simpleText || "Vídeo";
-              
-              return {
-                id: videoId,
-                title,
-                duration,
-                youtubeId: videoId
-              };
-            })
-            .filter(Boolean);
         }
-      } catch (jsonErr) {
-        console.error("Error parsing YouTube JSON on client:", jsonErr);
-      }
+
+        // Classic playlistVideoRenderer
+        if (obj.playlistVideoRenderer) {
+          const renderer = obj.playlistVideoRenderer;
+          const videoId = renderer.videoId;
+          const title = renderer.title?.runs?.[0]?.text ||
+                        renderer.title?.simpleText ||
+                        renderer.title?.accessibility?.accessibilityData?.label;
+          const duration = renderer.lengthText?.simpleText || "Vídeo";
+
+          if (videoId && title && !seenIds.has(videoId)) {
+            seenIds.add(videoId);
+            videos.push({
+              id: videoId,
+              title: title.trim(),
+              duration,
+              youtubeId: videoId
+            });
+          }
+        }
+
+        if (Array.isArray(obj)) {
+          for (const item of obj) findVideosRecursive(item);
+        } else {
+          for (const key of Object.keys(obj)) findVideosRecursive(obj[key]);
+        }
+      };
+
+      findVideosRecursive(data);
+    } catch (jsonErr) {
+      console.error("Error parsing YouTube JSON on client:", jsonErr);
     }
   }
 
   // Backup regex-based extraction
   if (videos.length === 0) {
-    const videoIdMatches = [...html.matchAll(/"videoId":"([^"]+)"/g)].map(m => m[1]);
+    const videoIdMatches = [...html.matchAll(/"videoId":"([a-zA-Z0-9_-]{11})"/g)].map(m => m[1]);
     const uniqueVideoIds = Array.from(new Set(videoIdMatches)).slice(0, 100);
     
     if (uniqueVideoIds.length > 0) {
@@ -115,7 +115,9 @@ export default function VideoModal({
   const [activeSubVideoIndex, setActiveSubVideoIndex] = useState<number>(0);
   const [dynamicSubVideos, setDynamicSubVideos] = useState<any[]>(video?.subVideos || []);
   const [playerError, setPlayerError] = useState<string | null>(null);
-  const loadingPlaylist = false;
+  const [loadingPlaylist, setLoadingPlaylist] = useState<boolean>(false);
+  const [useDirectEmbed, setUseDirectEmbed] = useState<boolean>(false);
+  const [reloadTrigger, setReloadTrigger] = useState<number>(0);
 
   const playerRef = useRef<any>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -155,16 +157,47 @@ export default function VideoModal({
     });
   };
 
+  // Sync subvideos and fetch updated titles whenever video/playlist changes
   useEffect(() => {
     if (!video) return;
     setPlayerError(null);
+    setUseDirectEmbed(false);
     setDynamicSubVideos(video.subVideos || []);
     setActiveSubVideoIndex(0);
+
+    if (video.playlistId) {
+      setLoadingPlaylist(true);
+      fetch(`/api/playlist?list=${video.playlistId}`)
+        .then(res => res.json())
+        .then(data => {
+          if (data.success && Array.isArray(data.videos) && data.videos.length > 0) {
+            setDynamicSubVideos(prev => {
+              return data.videos.map((vid: any, idx: number) => {
+                const existing = prev.find((p: any) => p.youtubeId === vid.id) ||
+                                 prev[idx] ||
+                                 video.subVideos?.[idx];
+                return {
+                  id: existing?.id || vid.id,
+                  title: vid.title && vid.title !== "Sem título" ? vid.title : (existing?.title || `Aula ${idx + 1} da Playlist`),
+                  duration: vid.duration && vid.duration !== "Vídeo" ? vid.duration : (existing?.duration || "Vídeo"),
+                  youtubeId: vid.youtubeId || vid.id
+                };
+              });
+            });
+          }
+        })
+        .catch(err => {
+          console.warn("[YouTube Playlist] Error loading from /api/playlist:", err);
+        })
+        .finally(() => {
+          setLoadingPlaylist(false);
+        });
+    }
   }, [video]);
 
   // Main effect to handle YT.Player instantiation and synchronization
   useEffect(() => {
-    if (!video) return;
+    if (!video || useDirectEmbed) return;
 
     let active = true;
 
@@ -183,147 +216,79 @@ export default function VideoModal({
         console.log("[YouTube Debug] Target div prepared in DOM");
       }
 
-      const origin = window.location.origin;
+      const currentId = dynamicSubVideos[activeSubVideoIndex]?.youtubeId ||
+                        video.subVideos?.[activeSubVideoIndex]?.youtubeId ||
+                        video.youtubeId;
+
       const playerVars: any = {
         autoplay: 1,
         rel: 0,
         enablejsapi: 1,
-        origin: origin,
-        host: "https://www.youtube.com",
-        widget_referrer: origin,
         modestbranding: 1,
         playsinline: 1
       };
 
-      if (video.playlistId) {
-        playerVars.listType = "playlist";
-        playerVars.list = video.playlistId;
-        playerVars.index = activeSubVideoIndex;
+      if (typeof window !== "undefined" && window.location?.origin && window.location.origin.startsWith("http")) {
+        playerVars.origin = window.location.origin;
       }
 
-      console.log("[YouTube Debug] Instantiating player with options:", {
-        playlistId: video.playlistId,
-        videoId: video.playlistId ? undefined : (video.subVideos?.[activeSubVideoIndex]?.youtubeId || video.youtubeId),
-        playerVars
-      });
+      console.log("[YouTube Debug] Instantiating player for video ID:", currentId);
 
       try {
         const playerOptions: any = {
           height: "100%",
           width: "100%",
+          host: "https://www.youtube-nocookie.com",
+          videoId: currentId,
           playerVars: playerVars,
           events: {
             onReady: (event: any) => {
               if (!active) return;
-              console.log("[YouTube Debug] onReady event triggered successfully");
+              console.log("[YouTube Debug] onReady event triggered successfully for video:", currentId);
               setPlayerError(null);
 
               try {
-                // Ensure permissions and security constraints are fully configured on the generated iframe
-                const iframe = event.target.getIframe();
+                const iframe = event.target.getIframe?.();
                 if (iframe) {
-                  iframe.setAttribute("allow", "autoplay; encrypted-media; picture-in-picture; fullscreen");
-                  iframe.setAttribute("referrerpolicy", "no-referrer-when-downgrade");
+                  iframe.setAttribute("allow", "accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share; fullscreen");
+                  iframe.setAttribute("referrerpolicy", "strict-origin-when-cross-origin");
                   iframe.setAttribute("id", "youtube-player-iframe");
-                  console.log("[YouTube Debug] Security and permission attributes successfully set on iframe");
                 }
               } catch (attrErr) {
                 console.warn("[YouTube Debug] Could not write iframe attributes:", attrErr);
-              }
-
-              // Update sub-videos if getPlaylist is available
-              if (video.playlistId) {
-                try {
-                  const playlistIds = event.target.getPlaylist();
-                  if (playlistIds && playlistIds.length > 0) {
-                    console.log("[YouTube Debug] Loaded official playlist item count:", playlistIds.length);
-                    setDynamicSubVideos(() => {
-                      return playlistIds.map((id: string, idx: number) => {
-                        const existingMock = video.subVideos?.[idx];
-                        if (existingMock) {
-                          return {
-                            ...existingMock,
-                            youtubeId: id
-                          };
-                        }
-                        return {
-                          id: `dynamic-${id}-${idx}`,
-                          title: `Aula ${idx + 1} da Playlist`,
-                          duration: "Vídeo",
-                          youtubeId: id
-                        };
-                      });
-                    });
-                  }
-                } catch (playlistErr) {
-                  console.warn("[YouTube Debug] Error accessing playlist IDs onReady:", playlistErr);
-                }
               }
             },
             onStateChange: (event: any) => {
               if (!active) return;
               console.log("[YouTube Debug] onStateChange state:", event.data);
-              
-              if (video.playlistId) {
-                try {
-                  const currentIndex = event.target.getPlaylistIndex();
-                  if (currentIndex !== -1 && currentIndex !== undefined && currentIndex !== activeSubVideoIndex) {
-                    console.log("[YouTube Debug] State-change index sync:", currentIndex);
-                    setActiveSubVideoIndex(currentIndex);
-                  }
-
-                  const playlistIds = event.target.getPlaylist();
-                  if (playlistIds && playlistIds.length > 0) {
-                    setDynamicSubVideos((prev) => {
-                      if (prev.length < playlistIds.length) {
-                        return playlistIds.map((id: string, idx: number) => {
-                          const existingMock = video.subVideos?.[idx];
-                          if (existingMock) {
-                            return {
-                              ...existingMock,
-                              youtubeId: id
-                            };
-                          }
-                          return {
-                            id: `dynamic-${id}-${idx}`,
-                            title: `Aula ${idx + 1} da Playlist`,
-                            duration: "Vídeo",
-                            youtubeId: id
-                          };
-                        });
-                      }
-                      return prev;
-                    });
-                  }
-                } catch (syncErr) {
-                  console.warn("[YouTube Debug] Sync error:", syncErr);
-                }
+              // When video ends (0 = YT.PlayerState.ENDED), advance to next lesson
+              if (event.data === 0) {
+                console.log("[YouTube Debug] Video ended, advancing to next lesson");
+                setActiveSubVideoIndex(prev => Math.min(prev + 1, dynamicSubVideos.length - 1));
               }
             },
             onError: (event: any) => {
               if (!active) return;
               console.error("[YouTube Debug] Player error occurred:", event.data);
+              if (event.data === 101 || event.data === 150) {
+                console.log("[YouTube Debug] Error 150/101 detected (embed restriction). Switching to direct embed fallback...");
+                setUseDirectEmbed(true);
+                setPlayerError(null);
+                return;
+              }
               let friendlyError = "Ocorreu um erro ao reproduzir este vídeo.";
               if (event.data === 2) friendlyError = "Parâmetro inválido de ID do vídeo.";
               if (event.data === 5) friendlyError = "O conteúdo solicitado não pode ser reproduzido no player HTML5.";
               if (event.data === 100) friendlyError = "O vídeo solicitado não foi encontrado ou foi removido.";
-              if (event.data === 101 || event.data === 150) {
-                friendlyError = "O proprietário do vídeo não permite a reprodução em players incorporados fora do YouTube.";
-              }
               setPlayerError(friendlyError);
             }
           }
         };
 
-        const calculatedVideoId = video.playlistId ? undefined : (video.subVideos?.[activeSubVideoIndex]?.youtubeId || video.youtubeId);
-        if (calculatedVideoId) {
-          playerOptions.videoId = calculatedVideoId;
-        }
-
         playerRef.current = new (window as any).YT.Player("youtube-player-element", playerOptions);
       } catch (err: any) {
         console.error("[YouTube Debug] Failed to create YT.Player instance:", err);
-        setPlayerError("Não foi possível carregar o player do YouTube.");
+        setUseDirectEmbed(true);
       }
     };
 
@@ -332,35 +297,27 @@ export default function VideoModal({
     return () => {
       active = false;
     };
-  }, [video]); // Re-initialize only if the main video/course changes
+  }, [video, reloadTrigger, useDirectEmbed]);
 
-  // Control playback indexing dynamically (smoothly switching without full player rebuild)
+  // Smoothly switch video without rebuilding player when activeSubVideoIndex changes
   useEffect(() => {
-    if (!video || !playerRef.current) return;
+    if (!video || !playerRef.current || useDirectEmbed) return;
 
     try {
-      if (video.playlistId) {
-        if (typeof playerRef.current.getPlaylistIndex === "function") {
-          const currentPlayerIndex = playerRef.current.getPlaylistIndex();
-          if (currentPlayerIndex !== activeSubVideoIndex && currentPlayerIndex !== -1 && currentPlayerIndex !== undefined) {
-            console.log("[YouTube Debug] Smoothly playing video at index:", activeSubVideoIndex);
-            playerRef.current.playVideoAt(activeSubVideoIndex);
-          }
-        }
-      } else {
-        if (typeof playerRef.current.loadVideoById === "function") {
-          const currentId = video.subVideos?.[activeSubVideoIndex]?.youtubeId || video.youtubeId;
-          console.log("[YouTube Debug] Smoothly playing single video id:", currentId);
-          playerRef.current.loadVideoById({
-            videoId: currentId,
-            suggestedQuality: "default"
-          });
-        }
+      const currentId = dynamicSubVideos[activeSubVideoIndex]?.youtubeId ||
+                        video.subVideos?.[activeSubVideoIndex]?.youtubeId ||
+                        video.youtubeId;
+      if (currentId && typeof playerRef.current.loadVideoById === "function") {
+        console.log("[YouTube Debug] Smoothly playing video id:", currentId);
+        playerRef.current.loadVideoById({
+          videoId: currentId,
+          suggestedQuality: "default"
+        });
       }
     } catch (playbackErr) {
-      console.warn("[YouTube Debug] Smooth index switch failed, recreating player:", playbackErr);
+      console.warn("[YouTube Debug] Smooth video switch failed:", playbackErr);
     }
-  }, [activeSubVideoIndex, video]);
+  }, [activeSubVideoIndex, dynamicSubVideos, video, useDirectEmbed]);
 
   // Clean up player on unmount
   useEffect(() => {
@@ -382,6 +339,7 @@ export default function VideoModal({
   const handleRetryPlayer = () => {
     console.log("[YouTube Debug] Retrying player initialization...");
     setPlayerError(null);
+    setUseDirectEmbed(false);
     if (playerRef.current) {
       try {
         if (typeof playerRef.current.destroy === "function") {
@@ -390,51 +348,15 @@ export default function VideoModal({
       } catch (_) {}
       playerRef.current = null;
     }
-    setActiveSubVideoIndex(activeSubVideoIndex);
+    setReloadTrigger(prev => prev + 1);
   };
 
   const handleNextVideo = () => {
-    if (playerRef.current && typeof playerRef.current.nextVideo === "function" && video?.playlistId) {
-      console.log("[YouTube Debug] User clicked Next: calling player.nextVideo()");
-      try {
-        playerRef.current.nextVideo();
-        setTimeout(() => {
-          if (playerRef.current && typeof playerRef.current.getPlaylistIndex === "function") {
-            const idx = playerRef.current.getPlaylistIndex();
-            if (idx !== -1 && idx !== undefined) {
-              setActiveSubVideoIndex(idx);
-            }
-          }
-        }, 200);
-      } catch (err) {
-        console.warn("[YouTube Debug] Failed to call player.nextVideo(), syncing manually", err);
-        setActiveSubVideoIndex(prev => Math.min(prev + 1, dynamicSubVideos.length - 1));
-      }
-    } else {
-      setActiveSubVideoIndex(prev => Math.min(prev + 1, dynamicSubVideos.length - 1));
-    }
+    setActiveSubVideoIndex(prev => Math.min(prev + 1, dynamicSubVideos.length - 1));
   };
 
   const handlePrevVideo = () => {
-    if (playerRef.current && typeof playerRef.current.previousVideo === "function" && video?.playlistId) {
-      console.log("[YouTube Debug] User clicked Previous: calling player.previousVideo()");
-      try {
-        playerRef.current.previousVideo();
-        setTimeout(() => {
-          if (playerRef.current && typeof playerRef.current.getPlaylistIndex === "function") {
-            const idx = playerRef.current.getPlaylistIndex();
-            if (idx !== -1 && idx !== undefined) {
-              setActiveSubVideoIndex(idx);
-            }
-          }
-        }, 200);
-      } catch (err) {
-        console.warn("[YouTube Debug] Failed to call player.previousVideo(), syncing manually", err);
-        setActiveSubVideoIndex(prev => Math.max(prev - 1, 0));
-      }
-    } else {
-      setActiveSubVideoIndex(prev => Math.max(prev - 1, 0));
-    }
+    setActiveSubVideoIndex(prev => Math.max(prev - 1, 0));
   };
 
   const hasSubVideos = dynamicSubVideos.length > 0;
@@ -442,6 +364,7 @@ export default function VideoModal({
 
   const currentTitle = currentSubVideo ? currentSubVideo.title : (video?.title || "");
   const currentDuration = currentSubVideo ? currentSubVideo.duration : (video?.duration || "");
+  const currentYoutubeId = currentSubVideo?.youtubeId || video?.subVideos?.[activeSubVideoIndex]?.youtubeId || video?.youtubeId || "";
 
   const [commentText, setCommentText] = useState("");
   const [comments, setComments] = useState<Comment[]>([
@@ -490,26 +413,63 @@ export default function VideoModal({
         <div className={`grid grid-cols-1 ${hasSubVideos ? "lg:grid-cols-3" : ""} bg-black border-b border-white/5`}>
           {/* Main Video Iframe */}
           <div className={`${hasSubVideos ? "lg:col-span-2" : "w-full"} relative aspect-video bg-black`}>
-            <div ref={containerRef} className="absolute inset-0 w-full h-full bg-black flex items-center justify-center">
-              <div id="youtube-player-element" className="w-full h-full" />
-            </div>
+            {useDirectEmbed ? (
+              <iframe
+                key={`direct-${currentYoutubeId}`}
+                src={`https://www.youtube-nocookie.com/embed/${currentYoutubeId}?autoplay=1&rel=0&playsinline=1`}
+                title={currentTitle}
+                className="w-full h-full border-0"
+                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share; fullscreen"
+                allowFullScreen
+                referrerPolicy="strict-origin-when-cross-origin"
+              />
+            ) : (
+              <div ref={containerRef} className="absolute inset-0 w-full h-full bg-black flex items-center justify-center">
+                <div id="youtube-player-element" className="w-full h-full" />
+              </div>
+            )}
 
             {/* Error Overlay */}
             {playerError && (
-              <div className="absolute inset-0 bg-black/95 flex flex-col items-center justify-center p-6 text-center z-10 gap-3">
+              <div className="absolute inset-0 bg-black/95 flex flex-col items-center justify-center p-6 text-center z-20 gap-3">
+                <div className="w-12 h-12 rounded-full bg-red-500/10 border border-red-500/20 flex items-center justify-center text-[#e50914]">
+                  <ExternalLink className="w-6 h-6" />
+                </div>
                 <p className="text-xs font-black text-red-500 uppercase tracking-widest bg-red-500/10 border border-red-500/20 px-2.5 py-1 rounded">
-                  Erro de Reprodução
+                  Restrição de Reprodução
                 </p>
-                <p className="text-xs text-gray-400 max-w-sm mt-1">
+                <p className="text-xs text-gray-300 max-w-md mt-1 leading-relaxed">
                   {playerError}
                 </p>
-                <button
-                  type="button"
-                  onClick={handleRetryPlayer}
-                  className="mt-2 px-4 py-2 bg-[#e50914] hover:bg-[#e50914]/95 text-white font-black text-[10px] uppercase tracking-wider rounded transition cursor-pointer"
-                >
-                  Recarregar Player
-                </button>
+                <div className="flex flex-wrap items-center justify-center gap-2.5 mt-2">
+                  <a
+                    href={`https://www.youtube.com/watch?v=${currentYoutubeId}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="px-4 py-2 bg-[#e50914] hover:bg-[#e50914]/90 text-white font-bold text-xs rounded transition flex items-center gap-2 cursor-pointer shadow-lg shadow-red-950/40"
+                  >
+                    <ExternalLink className="w-3.5 h-3.5" />
+                    Assistir no YouTube
+                  </a>
+                  {dynamicSubVideos.length > 1 && (
+                    <button
+                      type="button"
+                      onClick={handleNextVideo}
+                      className="px-3.5 py-2 bg-zinc-800 hover:bg-zinc-700 text-white font-bold text-xs rounded transition flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <span>Próxima Aula</span>
+                      <ChevronRight className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={handleRetryPlayer}
+                    className="px-3.5 py-2 bg-white/10 hover:bg-white/15 text-gray-300 font-bold text-xs rounded transition flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" />
+                    <span>Tentar Novamente</span>
+                  </button>
+                </div>
               </div>
             )}
           </div>
@@ -630,6 +590,31 @@ export default function VideoModal({
             <p className="text-gray-300 text-sm leading-relaxed text-left">
               {video.description}
             </p>
+
+            <div className="flex flex-wrap items-center gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => onMarkCompleted(video.id, video.xpValue)}
+                className={`px-4 py-2.5 rounded text-xs font-bold flex items-center gap-2 cursor-pointer transition ${
+                  isCompleted
+                    ? "bg-green-500/20 text-green-400 border border-green-500/30"
+                    : "bg-white text-black hover:bg-white/90"
+                }`}
+              >
+                <Check className="w-4 h-4" />
+                <span>{isCompleted ? "Aula Concluída" : "Marcar como Concluída"}</span>
+              </button>
+
+              <a
+                href={`https://www.youtube.com/watch?v=${currentYoutubeId}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="px-4 py-2.5 rounded text-xs font-bold border border-white/10 text-gray-300 hover:text-white hover:bg-white/5 flex items-center gap-2 transition"
+              >
+                <ExternalLink className="w-3.5 h-3.5 text-[#e50914]" />
+                <span>Assistir no YouTube</span>
+              </a>
+            </div>
 
 
           </div>

@@ -47,6 +47,13 @@ export default function VideoRow({
                     alt={video.title}
                     className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105"
                     referrerPolicy="no-referrer"
+                    onError={(e) => {
+                      if (video.youtubeId) {
+                        e.currentTarget.src = `https://i.ytimg.com/vi/${video.youtubeId}/hqdefault.jpg`;
+                      } else {
+                        e.currentTarget.src = "https://images.unsplash.com/photo-1505664194779-8beaceb93744?auto=format&fit=crop&w=800&q=80";
+                      }
+                    }}
                   />
                   <div className="absolute inset-0 bg-gradient-to-t from-black via-black/20 to-transparent opacity-80" />
                   

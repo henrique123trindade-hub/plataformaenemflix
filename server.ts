@@ -63,12 +63,54 @@ async function startServer() {
   app.use(express.json({ limit: "50mb" }));
   app.use(express.urlencoded({ limit: "50mb", extended: true }));
 
+  // In-memory cache for playlists and video metadata
+  const playlistCache = new Map<string, { timestamp: number; videos: any[] }>();
+  const videoTitleCache = new Map<string, string>();
+  const PLAYLIST_CACHE_TTL = 1000 * 60 * 60; // 1 hour
+
+  // API Route: Get title and metadata for an individual YouTube video
+  app.get("/api/video-info", async (req, res) => {
+    try {
+      const videoId = req.query.id;
+      if (!videoId || typeof videoId !== "string") {
+        return res.status(400).json({ success: false, error: "Missing video id" });
+      }
+
+      if (videoTitleCache.has(videoId)) {
+        return res.json({ success: true, id: videoId, title: videoTitleCache.get(videoId) });
+      }
+
+      const oembedUrl = `https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`;
+      const response = await globalThis.fetch(oembedUrl, {
+        headers: { "User-Agent": "Mozilla/5.0" }
+      });
+
+      if (response.ok) {
+        const data: any = await response.json();
+        if (data && data.title) {
+          videoTitleCache.set(videoId, data.title);
+          return res.json({ success: true, id: videoId, title: data.title, author: data.author_name });
+        }
+      }
+
+      return res.json({ success: false, id: videoId, title: null });
+    } catch (err: any) {
+      return res.json({ success: false, error: err.message });
+    }
+  });
+
   // API Route: Get complete and live list of videos from a YouTube playlist
   app.get("/api/playlist", async (req, res) => {
     try {
       const playlistId = req.query.list;
       if (!playlistId || typeof playlistId !== "string") {
         return res.status(400).json({ success: true, videos: [] });
+      }
+
+      // Check in-memory cache
+      const cached = playlistCache.get(playlistId);
+      if (cached && Date.now() - cached.timestamp < PLAYLIST_CACHE_TTL && cached.videos.length > 0) {
+        return res.json({ success: true, playlistId, videos: cached.videos, cached: true });
       }
 
       const url = `https://www.youtube.com/playlist?list=${playlistId}`;
@@ -84,86 +126,128 @@ async function startServer() {
       }
 
       const html = await response.text();
-      const startStr = "ytInitialData = ";
-      const startIndex = html.indexOf(startStr);
-      
       let videos: any[] = [];
+      const seenIds = new Set<string>();
 
-      if (startIndex !== -1) {
-        const dataStart = startIndex + startStr.length;
-        const scriptEndIndex = html.indexOf("</script>", dataStart);
-        if (scriptEndIndex !== -1) {
-          let jsonStr = html.substring(dataStart, scriptEndIndex).trim();
-          if (jsonStr.endsWith(";")) {
-            jsonStr = jsonStr.slice(0, -1);
-          }
-          try {
-            const data = JSON.parse(jsonStr);
-            
-            // Ultra-robust recursive search to find the playlist items array
-            const findPlaylistVideosInObject = (obj: any): any[] | null => {
-              if (!obj || typeof obj !== "object") return null;
-              
-              if (Array.isArray(obj)) {
-                const hasVideoRenderers = obj.some(item => item && (item.playlistVideoRenderer || item.videoRenderer || item.childVideoRenderer));
-                if (hasVideoRenderers) {
-                  return obj;
-                }
-                for (const item of obj) {
-                  const res = findPlaylistVideosInObject(item);
-                  if (res) return res;
-                }
-              } else {
-                for (const key of Object.keys(obj)) {
-                  const res = findPlaylistVideosInObject(obj[key]);
-                  if (res) return res;
-                }
+      // Look for ytInitialData
+      const match = html.match(/var ytInitialData = (\{.+?\});<\/script>/) ||
+                    html.match(/window\["ytInitialData"\] = (\{.+?\});<\/script>/);
+
+      if (match && match[1]) {
+        try {
+          const data = JSON.parse(match[1]);
+
+          const findVideosRecursive = (obj: any) => {
+            if (!obj || typeof obj !== "object") return;
+
+            // 1. Support modern YouTube UI (lockupViewModel)
+            if (obj.lockupViewModel) {
+              const vm = obj.lockupViewModel;
+              const title = vm.metadata?.lockupMetadataViewModel?.title?.content ||
+                            vm.rendererContext?.accessibilityContext?.label;
+              const videoId = vm.rendererContext?.commandContext?.onTap?.innertubeCommand?.watchEndpoint?.videoId ||
+                              vm.contentImage?.thumbnailViewModel?.overlays?.[0]?.thumbnailBottomOverlayViewModel?.badges?.[0]?.thumbnailBadgeViewModel?.animationActivationTargetId;
+              const duration = vm.contentImage?.thumbnailViewModel?.overlays?.[0]?.thumbnailBottomOverlayViewModel?.badges?.[0]?.thumbnailBadgeViewModel?.text || "Vídeo";
+
+              if (videoId && title && !seenIds.has(videoId)) {
+                seenIds.add(videoId);
+                videoTitleCache.set(videoId, title);
+                videos.push({
+                  id: videoId,
+                  title: title.trim(),
+                  duration,
+                  youtubeId: videoId
+                });
               }
-              return null;
-            };
-
-            const list = findPlaylistVideosInObject(data);
-            
-            if (list && Array.isArray(list)) {
-              videos = list
-                .map((item: any) => {
-                  const renderer = item.playlistVideoRenderer || item.videoRenderer || item.childVideoRenderer;
-                  if (!renderer) return null;
-                  
-                  const videoId = renderer.videoId;
-                  if (!videoId) return null;
-
-                  const title = renderer.title?.runs?.[0]?.text || renderer.title?.simpleText || renderer.title?.accessibility?.accessibilityData?.label || "Sem título";
-                  const duration = renderer.lengthText?.simpleText || "Vídeo";
-                  
-                  return {
-                    id: videoId,
-                    title,
-                    duration,
-                    youtubeId: videoId
-                  };
-                })
-                .filter(Boolean);
             }
-          } catch (jsonErr) {
-            console.error("Erro ao fazer parse do JSON do YouTube:", jsonErr);
-          }
+
+            // 2. Support classic YouTube UI (playlistVideoRenderer)
+            if (obj.playlistVideoRenderer) {
+              const renderer = obj.playlistVideoRenderer;
+              const videoId = renderer.videoId;
+              const title = renderer.title?.runs?.[0]?.text ||
+                            renderer.title?.simpleText ||
+                            renderer.title?.accessibility?.accessibilityData?.label;
+              const duration = renderer.lengthText?.simpleText || "Vídeo";
+
+              if (videoId && title && !seenIds.has(videoId)) {
+                seenIds.add(videoId);
+                videoTitleCache.set(videoId, title);
+                videos.push({
+                  id: videoId,
+                  title: title.trim(),
+                  duration,
+                  youtubeId: videoId
+                });
+              }
+            }
+
+            if (Array.isArray(obj)) {
+              for (const item of obj) {
+                findVideosRecursive(item);
+              }
+            } else {
+              for (const key of Object.keys(obj)) {
+                findVideosRecursive(obj[key]);
+              }
+            }
+          };
+
+          findVideosRecursive(data);
+        } catch (jsonErr) {
+          console.error("Erro ao fazer parse do JSON do YouTube:", jsonErr);
         }
       }
 
-      // Fallback: If parsing failed or playlist was empty, try regex match for videos
+      // Fallback: If parsing found no videos or very few, extract video IDs via regex and fetch accurate titles via oEmbed
       if (videos.length === 0) {
-        const videoIdMatches = [...html.matchAll(/"videoId":"([^"]+)"/g)].map(m => m[1]);
-        const uniqueVideoIds = Array.from(new Set(videoIdMatches)).slice(0, 100); // limit to 100
-        
+        const videoIdMatches = [...html.matchAll(/"videoId":"([a-zA-Z0-9_-]{11})"/g)].map(m => m[1]);
+        const uniqueVideoIds = Array.from(new Set(videoIdMatches)).slice(0, 50);
+
         if (uniqueVideoIds.length > 0) {
-          videos = uniqueVideoIds.map((id, index) => ({
-            id,
-            title: `Aula ${index + 1} da Playlist`,
-            duration: "Vídeo",
-            youtubeId: id
-          }));
+          const fetchedVideos = await Promise.all(
+            uniqueVideoIds.map(async (id, index) => {
+              // Try cached title first
+              if (videoTitleCache.has(id)) {
+                return {
+                  id,
+                  title: videoTitleCache.get(id)!,
+                  duration: "Vídeo",
+                  youtubeId: id
+                };
+              }
+
+              // Try oEmbed for true title
+              try {
+                const oembedRes = await globalThis.fetch(`https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${id}&format=json`);
+                if (oembedRes.ok) {
+                  const odata: any = await oembedRes.json();
+                  if (odata && odata.title) {
+                    videoTitleCache.set(id, odata.title);
+                    return {
+                      id,
+                      title: odata.title,
+                      duration: "Vídeo",
+                      youtubeId: id
+                    };
+                  }
+                }
+              } catch (_) {}
+
+              return {
+                id,
+                title: `Aula ${index + 1} da Playlist`,
+                duration: "Vídeo",
+                youtubeId: id
+              };
+            })
+          );
+          videos = fetchedVideos;
         }
+      }
+
+      if (videos.length > 0) {
+        playlistCache.set(playlistId, { timestamp: Date.now(), videos });
       }
 
       res.json({ success: true, playlistId, videos });

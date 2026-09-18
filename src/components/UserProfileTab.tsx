@@ -544,7 +544,17 @@ export default function UserProfileTab({
                       className="bg-[#141414] border border-white/5 rounded overflow-hidden group cursor-pointer hover:border-[#e50914]/30 hover:ring-2 hover:ring-[#e50914]/20 transition-all duration-300"
                     >
                       <div className="relative h-32 bg-black">
-                        <img src={item.thumbnail} alt={item.title} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300" />
+                        <img 
+                          src={item.thumbnail} 
+                          alt={item.title} 
+                          className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                          referrerPolicy="no-referrer"
+                          onError={(e) => {
+                            if (item.youtubeId) {
+                              e.currentTarget.src = `https://i.ytimg.com/vi/${item.youtubeId}/hqdefault.jpg`;
+                            }
+                          }}
+                        />
                         <div className="absolute inset-0 bg-black/40 flex items-center justify-center opacity-0 group-hover:opacity-100 transition">
                           <Play className="w-8 h-8 text-white fill-white" />
                         </div>
